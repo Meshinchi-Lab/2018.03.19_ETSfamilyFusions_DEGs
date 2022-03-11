@@ -1,0 +1,519 @@
+---
+title: 'ETS Family Mutations and Fusions in 0531'
+author: "Jenny Smith"
+date: "January 2, 2019"
+output: html_document
+---
+
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height=5, fig.width=8)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.03.19_ETSfamilyFusions_DEGs/')
+options(stringsAsFactors = FALSE)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(gridExtra)
+getwd()
+```
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/ggplot_Themes_Function.r")
+```
+
+
+# ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv"),
+                   na.strings = c("#N/A", "NA", ".",""))
+
+merged <- merged %>% 
+  filter(!grepl("Unknown", USI)) %>%
+  filter(Eligibility_Comments != "remove")
+
+
+dim(merged) #2217  150
+```
+
+```{r}
+sample_info <- read.csv(file.path(TARGET,
+                                    "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_06.09.21.csv")) 
+
+dim(sample_info)
+table(sample_info$Batch)
+```
+
+
+
+
+# Gene Annotations
+
+```{r}
+geneIDmap <- read.delim(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_5.14.21.txt"))
+
+dim(geneIDmap) #59853    23
+# View(geneIDmap)
+```
+
+```{r}
+ETS <- read.csv("~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/ETS transcription factor family_HGNC.csv", 
+                stringsAsFactors = FALSE)
+head(ETS)
+dim(ETS)
+
+ETS.re <- paste(c("ETS",ETS$Approved.Symbol), collapse = "|")
+```
+
+
+# Expression Data
+
+```{r}
+cts <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_GeneLevel_dupGenesRemoved_scaledTPM_counts.RDS"))
+colnames(cts)[grep("PATGIG|PATISD", colnames(cts))] <- gsub("_replicate", "", grep("PATGIG|PATISD", colnames(cts), value=T))
+
+geneIDs <- cts[,1:2]
+rownames(cts) <- cts$gene_name
+cts <- cts[,-c(1:2)]
+
+dim(cts)
+head(cts[,1:5]) #58261  2168
+```
+
+```{r}
+TPM <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_Kallisto_Quant_GeneLevel_dupGenesRemoved_Abundance_TPM.RDS"))
+colnames(TPM)[grep("PATGIG|PATISD", colnames(TPM))] <- gsub("_replicate", "", grep("PATGIG|PATISD", colnames(TPM), value=T))
+
+
+geneIDs.tpm <- TPM[,1:2]
+rownames(TPM) <- TPM$gene_name
+TPM <- TPM[,-c(1:2)]
+
+
+dim(TPM)
+head(TPM[,1:5])
+```
+
+
+
+#Select Patient Cohort
+
+```{r}
+ETS.Expn <- tpm.RBD %>%
+  rownames_to_column("Gene") %>%
+  filter(Gene %in% c("EWSR1",ETS$Approved.Symbol)) %>%
+  gather(USI, TPM, -Gene)
+
+head(ETS.Expn)
+dim(ETS.Expn)
+
+length(unique(ETS.Expn$Gene)) #all 28
+length(unique(ETS.Expn$USI)) #1460 
+```
+
+```{r}
+N.3 <- function(x){sum(grepl("Yes", x)) > 2}
+pts.RBD <- intersect(CDE.merged$USI, colnames(tpm.RBD)) #1279
+cols <- colnames(CDE.merged) %>% grep(ETS.re,., value=TRUE)
+
+ColsToKeep <- select_if(CDE.merged[pts.RBD,cols],N.3) %>%
+  colnames(.)
+```
+
+```{r}
+No.CDE <- setdiff(colnames(tpm.RBD), CDE.merged$USI) %>% grep("BM[0-9]|RO[0-9]", ., invert = T, value=TRUE)
+```
+
+
+```{r}
+ETS.df <- ETS.Expn %>%
+  filter(grepl("^BM[0-9]|RO[0-9]", USI) | USI %in% pts.RBD) %>%
+  left_join(., select(CDE.merged, USI, ColsToKeep, contains(".Bar"), 
+                      Primary.Fusion, Fusion.Category,Protocol,
+                      Known.Fusion.detected.by.any.method, 
+                      Cytogenetic.Category.1, Rare.Fusions), 
+             by="USI") %>%
+  # mutate(Group=ifelse(grepl("^BM[0-9]|RO[0-9]", USI),"NBM", "AML")) %>%
+  # 
+  # mutate_at(vars(ColsToKeep,contains(".Bar"),Cytogenetic.Category.1, Rare.Fusions ),
+  #             funs(case_when(
+  #               grepl("^BM[0-9]|RO[0-9]", USI) ~ "NBM", 
+  #               TRUE ~ .))) %>%
+  # 
+  # mutate_at(vars(ColsToKeep), 
+  #           funs(gsub("No|Unknown","OtherAML", .))) %>%
+  # 
+  # mutate_at(vars(ETS.Family.Fusions), funs(gsub("Yes", "ETS_Fusions",.))) %>%
+  # 
+  # mutate_at(vars(ETS.Fusions.Bar, ETS.Family.Fusions), funs(case_when(
+  #   . == "OtherAML" & . != "Yes" & Rare.Fusions == "CBFA2T3.GLIS2" ~ "CBFA2T3.GLIS2",
+  #   . == "OtherAML" & . != "Yes" & Rare.Fusions == "DEK.NUP214" ~ "DEK.NUP214",
+  #   . == "OtherAML" & . != "Yes" & Rare.Fusions == "NUP98.KDM5A" ~ "NUP98.KDM5A",
+  #   . == "OtherAML" & . != "Yes" & Rare.Fusions == "NUP98.NSD1" ~ "NUP98.NSD1",
+  #   . == "OtherAML" & . != "Yes" & Rare.Fusions == "RBM15.MKL1" ~ "RBM15.MKL1",
+  #   TRUE ~ .))) %>%
+  # arrange(Gene,ETS.Fusions.Bar,desc(TPM))
+
+
+# head(ETS.df)
+dim(ETS.df)
+length(unique(ETS.df$USI))
+```
+
+```{r}
+table(ETS.df$ETS.Family.Fusions)
+table(ETS.df$ETS.Fusions.Bar)
+```
+
+
+#Compare Groups for ETS Fusions 
+
+```{r message=FALSE}
+library(compareGroups)
+```
+
+
+```{r}
+ETS.CDE <- CDE.merged 
+
+
+
+
+dim(ETS.CDE) #1,279
+```
+
+
+
+
+
+
+
+#Expression Summary Stats 
+
+```{r}
+Sum.Stat <- ETS.df %>%
+  group_by(Gene,Group) %>%
+  summarise(mean=mean(TPM),median=median(TPM),max=max(TPM),sd=sd(TPM)) %>%
+  mutate_if(is.numeric, funs(round(., digits = 2))) %>%
+  arrange(Group,desc(median)) 
+  # gather(Stat,Value,-Group,-Gene) %>%
+  # spread(Group,Value)
+
+Sum.Stat
+
+# write.csv(Sum.Stat, "TARGET_AML_RBD_AML_vs_NBM_ETS_Expression.csv", row.names = FALSE)
+```
+
+
+#Waterfall plots 
+
+```{r}
+waterfall.plots <- function(melted.df, col,gene){
+  # print(col)
+  # print(gene)
+  library(RColorBrewer)
+  
+
+  melted.df <- melted.df %>% 
+    filter(Gene == gene)
+  
+  #How to use NSE for column names that are entered as strings??
+  first.last <- c("NBM","OtherAML")
+  middle <- setdiff(unique(melted.df[[col]]), first.last)
+  melted.df$factor.levels  <- factor(melted.df[[col]], levels=c(first.last[1],middle,first.last[2]))
+  # melted.df$factor.levels <- relevel(f,ref = "NBM")
+
+  #sort and order by group and then increasing TPM expression 
+  melted.df <- melted.df %>%
+    arrange_at(vars(factor.levels,TPM)) %>%
+    mutate(USI2=factor(USI, levels = USI)) 
+  
+  #use color palette with more contrasts
+  n <- length(unique(melted.df[[col]]))
+  pal <- brewer.pal(min(n,9), "Set1") %>% 
+    gsub("#F781BF", "burlywood3", .) %>%
+    c(., "turquoise3", "blue", "black","seagreen2", "maroon", "orchid", "cornflowerblue", 
+      "darkblue", "azure4", "chartreuse1", "darkmagenta","orange1", "deeppink", "darkslategray1",
+      "green4", "navajowhite2","brown3", "darkgoldenrod3", "deepskyblue1", "lightcoral", "mediumorchid", "saddlebrown")
+
+  p <- ggplot(melted.df, aes(x=USI2, y=TPM, color=factor.levels, fill=factor.levels)) +
+    geom_bar(stat="identity", position = "dodge") +
+    theme_JS +
+    theme(axis.text.x = element_blank()) +
+    labs(x="Patient", y="TPM", title=paste0(gene," Expression in Pediatric AML")) +
+    scale_fill_manual(name=col,values=pal) +
+    scale_color_manual(name=col,values=pal)
+
+  return(p)
+  
+  # return(melted.df)
+
+}
+```
+
+select(ELF1,SPI1,FLI1,EWSR1)
+
+```{r}
+# ETS.genes <- unique(ETS.df$Gene)
+ETS.genes <- c("ELF1","SPI1","FLI1","EWSR1")
+w.plots_ETS.Fusions <- lapply(ETS.genes,
+                              function(x)waterfall.plots(melted.df=ETS.df,col="ETS.Family.Fusions", gene=x)) %>%
+  set_names(ETS.genes)
+
+
+# length(w.plots_ETS.Fusions)
+```
+
+```{r fig.width=10, fig.height=5}
+# pdf("TARGET_RBD_ELF1_SPI1_withFusions_Waterfall.pdf", height = 4, width = 10)
+marrangeGrob(grobs = w.plots_ETS.Fusions, ncol=1, nrow=2)
+# dev.off()
+```
+
+```{r }
+w.plots_ETS.Grp <- lapply(ETS.genes,
+                              function(x)waterfall.plots(melted.df=ETS.df,col="ETS.Fusions.Bar", gene=x))%>%
+  set_names(ETS.genes)
+
+
+length(w.plots_ETS.Grp)
+```
+
+```{r fig.width=12, fig.height=4}
+
+marrangeGrob(grobs = w.plots_ETS.Grp, ncol=1, nrow=2)
+# w.plots_ETS.Grp$ELF1
+```
+
+```{r}
+w.plots_Cyto <- lapply(ETS.genes,
+                              function(x)waterfall.plots(melted.df=ETS.df,col="Cytogenetic.Category.1", gene=x))%>%
+  set_names(ETS.genes)
+
+
+length(w.plots_Cyto)
+```
+
+
+```{r fig.width=8, fig.height=4.5}
+# pdf("TARGET_RBD_ELF1_SPI1_withCyto_Waterfall.pdf", height = 4, width = 10)
+marrangeGrob(grobs = w.plots_Cyto, ncol=1, nrow=2)
+# dev.off()
+```
+
+
+
+#Violin plots 
+
+```{r}
+violin.plots <- function(melted.df, col,gene){
+  # print(col)
+  # print(gene)
+  library(RColorBrewer)
+  
+  #subset for the gene to be plotted
+  melted.df <- melted.df %>% 
+    filter(Gene == gene)
+  
+  #How to use NSE for column names that are entered as strings??
+  first.last <- c("NBM","OtherAML")
+  middle <- setdiff(unique(melted.df[[col]]), first.last)
+  melted.df$factor.levels  <- factor(melted.df[[col]], levels=c(first.last[1],middle,first.last[2]))
+
+  #sort and order by group and then increasing TPM expression 
+  melted.df <- melted.df %>%
+    arrange_at(vars(factor.levels,TPM)) %>%
+    mutate(USI2=factor(USI, levels = USI)) 
+  
+  #use color palette with more contrasts
+  n <- length(unique(melted.df[[col]]))
+  pal <- brewer.pal(min(n,9), "Set1") %>% 
+    gsub("#F781BF", "burlywood3", .) %>%
+    c(., "turquoise3", "blue", "black","seagreen2", "maroon", "orchid", "cornflowerblue", 
+      "darkblue", "azure4", "chartreuse1", "darkmagenta","orange1", "deeppink", "darkslategray1",
+      "green4", "navajowhite2","brown3", "darkgoldenrod3", "deepskyblue1", "lightcoral", "mediumorchid", "saddlebrown")
+
+  p <- ggplot(melted.df, aes(x=factor.levels, y=TPM, fill=factor.levels)) +
+    geom_violin(draw_quantiles = 0.5, color="black") +
+    theme_JS +
+    labs(x="", y="TPM", title=paste0(gene," Expression in Pediatric AML"))
+    # scale_fill_manual(name=col,values=pal) +
+    # scale_color_manual(name=col,values=pal)
+
+  return(p)
+}
+```
+
+
+
+```{r}
+ETS.genes <- c("ELF1","SPI1","FLI1","EWSR1")
+v.plots_ETS.Fusions <- lapply(ETS.genes,
+                              function(x)violin.plots(melted.df=ETS.df,col="ETS.Family.Fusions", gene=x)) %>%
+  set_names(ETS.genes)
+
+
+# length(v.plots_ETS.Fusions)
+```
+
+
+```{r fig.height=5, fig.width=8}
+# v.plots_ETS.Fusions[[1]]
+# grid.arrange(grobs=v.plots_ETS.Fusions, ncol=2, nrow=2)
+lapply(names(v.plots_ETS.Fusions), function(x) ggsave(paste0(x,"_violinPlots_withFusions.tiff"),plot = v.plots_ETS.Fusions[[x]], device = "tiff", units = "in", dpi=200, height = 5, width=8))
+```
+
+
+```{r}
+v.plots_Cyto <- lapply(ETS.genes,
+                              function(x)violin.plots(melted.df=ETS.df,col="Cytogenetic.Category.1", gene=x))%>%
+  set_names(ETS.genes)
+
+
+```
+
+```{r fig.height=3, fig.width=6}
+v.plots_Cyto[[1]]
+# lapply(names(v.plots_ETS.Fusions), function(x) ggsave(paste0(x,"_violinPlots_withCyto.tiff"),
+#                                                       plot=v.plots_Cyto[[x]],
+#                                                       device = "tiff", units = "in",
+#                                                       dpi=200, height = 3, width=6))
+```
+
+
+
+#Heatmap with FUS-ERG results 
+
+## correlation  heatmap 
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/corrplot_Function.r")
+```
+
+```{r}
+fus.erg <- get(load("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.01.08_t.16.21/TARGET_AML_1031_FUS.ERG_and_RUNX1.CBFA2T3_vs_OtherAML_DEGs_list.RData"))
+
+```
+
+```{r}
+fus.erg.degs <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.01.08_t.16.21/TARGET_AML_1031_FUS.ERG_vs_OtherAML_DEGs.csv", row.names = 1)
+
+head(fus.erg.degs)
+```
+  # # mutate(Num.Status=factor(Status, levels=c( "NBM",
+  # #                                            "CBFA2T3.GLIS2",
+  # #                                            "DEK.NUP214",
+  # #                                            "ETS",
+  # #                                            "NUP98.KDM5A",
+  # #                                            "NUP98.NSD1",
+  # #                                            "RBM15.MKL1",
+  # #                                            "OtherAML"))) %>%
+```{r}
+df <- filter(ETS.df, Gene=="ELF1") %>%
+  select(USI,Status=ETS.Family.Fusions) %>% 
+  mutate(Status=factor(Status, levels=c( "NBM",
+                                             "CBFA2T3.GLIS2",
+                                             "DEK.NUP214",
+                                             "ETS_Fusions",
+                                             "NUP98.KDM5A",
+                                             "NUP98.NSD1",
+                                             "RBM15.MKL1",
+                                             "OtherAML"))) %>%
+  mutate(Num.Status=as.numeric(Status))
+
+head(df)
+
+dim(df)
+```
+
+
+```{r}
+pal <- brewer.pal(min(n,9), "Set1") %>% 
+      gsub("#F781BF", "burlywood2", .) %>%
+      c(., "turquoise3", "blue", "black","seagreen2", "maroon", 
+        "orchid", "cornflowerblue",  "darkblue", "azure4", "chartreuse1", 
+        "darkmagenta","orange1", "deeppink", "darkslategray1",
+        "green4", "navajowhite2","brown3", "darkgoldenrod3", "deepskyblue1", 
+        "lightcoral", "mediumorchid", "saddlebrown")
+
+pal
+```
+
+```{r}
+g_legend <- function(a.gplot){ 
+  tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+  legend <- tmp$grobs[[leg]] 
+  return(legend)} 
+
+l <- g_legend(color.Legend)
+grid.newpage()
+grid.draw(l)
+```
+
+```{r}
+l2 <- cowplot::get_legend(color.Legend)
+
+ggdraw(l2)
+```
+
+
+
+```{r}
+
+n <- 8
+col <- pal[1:n]
+
+subset <- df %>%
+  select(Status, Num.Status) %>%
+  arrange(Num.Status) %>%
+  unique() %>%
+  mutate(colors=col)
+
+head(subset)
+
+color.Legend <- ggplot(subset, aes(x=Status, y=0.25, fill=Status)) + 
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values=col) +
+  theme(legend.text = element_text(size=15))
+
+# table(df$Status,df$Num.Status, useNA = "always")
+```
+
+```{r}
+e <- tpm.RBD[fus.erg.degs$gene,]
+cp <- corPlot_withColorBar(expnData = e, CDE=df, log2=FALSE,offset = 22, diag.point.size = 15)
+```
+
+```{r}
+library(cowplot)
+# tiff("ETS_Fusions_withFUS.ERG_DEGs_CorrPlot.tiff", units="in", height=5, width=5, res=300)
+ggdraw(cp$legend)
+# dev.off()
+```
+
+```{r fig.height=10, fig.width=10}
+# tiff("TARGET_AML_RBD_FUS.ERG_withOtherETS_Corplot.tiff", height = 10, width = 10, units = "in", res=300)
+cp$heatmap2
+# dev.off()
+
+# write.csv(table(df$Status),"Freq.csv", row.names = FALSE)
+```
+
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+

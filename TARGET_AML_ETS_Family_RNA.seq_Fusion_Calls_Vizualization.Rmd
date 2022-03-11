@@ -1,0 +1,782 @@
+---
+title: "Subset BAMs and Visualize the Fusion Breakpoints"
+author: "Jenny Smith"
+date: "10/16/2020"
+output: html_document
+---
+
+
+#Set-up
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME, '2018.03.19_ETSfamilyFusions_DEGs/'))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, 
+                      fig.align='center', fig.width = 10, fig.height = 10)
+
+
+options(stringsAsFactors = FALSE,bitmapType = 'cairo', device='x11', useNA = "always", na.rm = T)
+grDevices::X11.options(type='cairo')
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(ggplot2)
+library(gridExtra)
+library(ggrepel)
+library(RColorBrewer)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+
+library(DeGSEA)
+library(fusBreakpoint)
+getwd()
+```
+
+
+# ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv"),
+                   na.strings = c("#N/A", "NA", ".",""))
+
+inelig <- merged %>% 
+  filter(Eligibility_Comments == "remove") %>% 
+  pull(USI)
+
+merged <- merged %>% 
+  filter(!grepl("Unknown", USI)) %>%
+  filter(Eligibility_Comments != "remove")
+
+
+dim(merged) #2217  150
+```
+
+```{r}
+sample_info <- read.csv(file.path(TARGET,
+                                    "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_07.14.21.csv")) 
+
+dim(sample_info)
+table(sample_info$Batch)
+```
+
+# Fusion Data 
+
+```{r message=FALSE, warning=FALSE}
+# fusions <- read_csv(file.path(PROJHOME,"2018.09.11_Combine_Fusion_Calls/Combined_withConfidence_Levels/TARGET_AML_0531_1031_Relapse_Combined_STAR_TransAbyss_CICERO_FusionCalls_withConfidenceLevels_Annotated_6.17.2020.csv"))
+
+fusions <- readr::read_csv(file.path(PROJHOME,"2018.09.11_Combine_Fusion_Calls/Combined_withConfidence_Levels/TARGET_AML_0531_1031_Relapse_Discovery_Combined_STAR_TransAbyss_CICERO_FusionCalls_withConfidenceLevels_Annotated_01.25.21.csv"))
+
+
+dim(fusions) #182596    169
+# fusions$All_Fusions_Called
+```
+
+# Reference Genome 
+
+```{r}
+# suppressPackageStartupMessages(library(Biostrings))
+# suppressPackageStartupMessages(library(GenomicFeatures))
+# library(BSgenome)
+```
+
+Will have to likely forge my own genome... but for godsake why is it sooo confusing. dont like a single vignette written by herve. confusing all of them. 
+
+https://www.biostars.org/p/159243/
+https://bioconductor.org/packages/release/bioc/vignettes/BSgenome/inst/doc/BSgenomeForge.pdf
+https://bioconductor.org/packages/release/bioc/vignettes/BSgenome/inst/doc/GenomeSearching.pdf
+
+http://web.mit.edu/~r/current/arch/i386_linux26/lib/R/library/GenomicRanges/doc/GenomicRangesHOWTOs.Rnw
+
+*one based or zero based* 
+https://www.biostars.org/p/84686/
+
+Why does all this matter?
+
+Moving from UCSC browser/tools to Ensembl browser/tools or back
+- Ensembl uses 1-based coordinate system
+- UCSC uses 0-based coordinate system
+- file formats are 1-based (GFF, SAM, VCF) 
+- file formats  are 0-based (BED, BAM)
+- See this excellent post and its many good links for more info:
+What are the advantages/disadvantages of one-based vs. zero-based genome coordinate systems
+
+```{r}
+IDmap <- read.csv(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/GeneSymbol_Ensembl_ID_Conversion_GRCh37.69_FromBCCA.csv")) %>% 
+  mutate_at(vars(geneSymbol), ~gsub("^MLL3$","KMT2C", .))
+
+head(IDmap)
+
+
+#BCCA version used old nomenclature of MLL3. 
+# IDmap %>% 
+#   filter(grepl("MLL3|KMT2C", geneSymbol))
+```
+
+```{r message=FALSE}
+Grch37.txdb <- AnnotationDbi::loadDb(file.path(PROJHOME, "0000.00.02_Reference_GeneInfo/GRCh37-lite_Ensembl_v69_TxDB.sqlite"))
+Grch37.txdb
+```
+
+```{r}
+Grch37.lite <- file.path(GENREFS,"GRCh37/fasta/genome/Grch37-lite/GRCh37-lite.fa")
+chrom_len_file <- file.path(PROJHOME, "0000.00.02_Reference_GeneInfo/Grch37.lite_chrom_lengths.txt")
+
+seqlens <- read.delim(chrom_len_file) %>% 
+  rownames_to_column("chr") %>%
+  pull(x, name=chr)
+
+
+# seqlens <- BSgenome::fasta.seqlengths(Grch37.lite)
+# write.table(seqlens,"Grch37.lite_chrom_lengths.txt",sep="\t",quote = F)
+# head(seqlens)
+```
+
+```{r}
+ETS <- read.csv(file.path(HOME, "0000.00.02_Reference_GeneInfo/ETS_transcription_factor_family_HGNC.csv"), 
+                stringsAsFactors = FALSE)
+head(ETS)
+# dim(ETS) #28  5
+ETS.re <- paste(c("ETS",ETS$Approved.Symbol), collapse = "|")
+```
+
+
+#Define BAM Files 
+
+```{r}
+BAM.manifest <- read.csv(file.path(TARGET, "SequencingDataMatrix/BAM_manifests/TARGET_AML_Ribodepleted_and_PolyA_RNAseq_Bam_Manifest_07.14.21.csv"))
+
+
+dim(BAM.manifest)
+table(duplicated(BAM.manifest$Sample)) #TRUE (due to polyA and RBD together)
+```
+
+
+
+
+# ETS Cohort
+
+```{r}
+ETS.full <- read.csv("TARGET_AML_ETS_Family_Fusions_Cohort_7.7.21.csv") 
+
+dim(ETS.full)
+# table(ETS.full$)
+table(ETS.full$ETS_Fusion_Groups)
+```
+
+```{r}
+ETS.grps <- ETS.full %>%
+  dplyr::filter(grepl("ETS-Fusion", AML_Subtype)) %>% 
+  arrange(ETS_Fusion) 
+
+# head(ETS.grps)
+dim(ETS.grps) #164   4
+table(ETS.grps$ETS_Fusion_Groups)
+```
+
+```{r}
+ets.regex <- pull(ETS.grps,ETS_Fusion) %>%
+  unique() %>%
+  str_split(., "-") %>%
+  #alphabetical order for Fusion Category
+  lapply(., function(x) paste(x[order(x)], collapse="-"))  %>%
+  unlist() %>% 
+  paste(., collapse="|")
+
+ets.regex
+```
+
+```{r}
+ETS.fusions <- fusions %>%
+  dplyr::filter(Time_point=="diagnostic", Lib_Prep=="RBD") %>% 
+  dplyr::filter(grepl(ets.regex, Fusion.Category)) %>%
+  dplyr::filter(USI %in% ETS.grps$USI) %>%
+
+
+  separate(Fusion.Category, into = c("GeneA","GeneB"), remove = F, sep="-") %>% 
+  left_join(., dplyr::select(ETS.grps,Sample, ETS_Fusion, ETS_Fusion_Groups),
+            by=c("Patient"="Sample")) %>% 
+  #reorder 
+  dplyr::select(Sample=Patient,
+                ETS_Fusion:ETS_Fusion_Groups,
+         Fusion.Category, 
+         GeneA,
+         GeneB,
+         breakpoint_comparison,
+         breakpoint.TA,Breakpoints.STAR,Breakpoint.CICERO, 
+         everything()) %>% 
+  arrange(ETS_Fusion_Groups,Fusion.Category) 
+
+
+
+# table(duplicated(ETS.fusions$Sample)) #FALSE for 48 samples
+# table(duplicated(ETS.fusions$USI))  #48 samples
+
+
+ETS.fusions
+# write.csv(ETS.fusions, "TARGET_AML_ETS_Family_Fusions_Raw_Fusion_Data_Subset.csv", row.names = FALSE)
+
+#These were all identified by cyto only. so OK
+# missing <- ETS.grps %>% 
+#   filter(! Sample %in% ETS.fusions$Sample)
+# table(missing$ETS_Fusion_Groups)
+```
+
+```{r}
+#select the primary breakpoint, only 1 per patient
+ETS.primary.breakpoints <- dplyr::select(ETS.fusions,
+                             Sample,
+                             ETS_Fusion:ETS_Fusion_Groups,
+                             Fusion.Category,
+                             breakpoint_comparison,
+                         breakpoint.TA,
+                         Breakpoints.STAR,
+                         Breakpoint.CICERO) %>% 
+  gather(Algorithm,Breakpoint, breakpoint.TA:Breakpoint.CICERO) %>%
+  dplyr::filter(!is.na(Breakpoint)) %>%
+  
+  #select one breakpoint per patient. Use the selection process below. 
+  group_by(Sample) %>%
+  mutate(keep=case_when(
+   n() == 1 ~ TRUE, #only TA, only STAR, and only CICERO calls. Just keep as is out of necessing
+   
+   #Highest confidence breakpoint positions. 
+   n() > 1 & all(breakpoint_comparison == "all_identical_breakpoints") & 
+     any(grepl("Breakpoints.STAR", Algorithm)) ~ ifelse(grepl("Breakpoints.STAR", Algorithm), TRUE, FALSE), 
+   n() > 1 & all(breakpoint_comparison == "all_identical_breakpoints") & 
+     any(grepl("Breakpoint.CICERO", Algorithm)) ~ ifelse(grepl("Breakpoint.CICERO", Algorithm), TRUE, FALSE),
+   n() > 1 & all(breakpoint_comparison == "all_identical_breakpoints") & 
+     any(grepl("breakpoint.TA", Algorithm)) ~ ifelse(grepl("breakpoint.TA", Algorithm), TRUE, FALSE),
+   
+   # Keep fusion breakpoint with at least 2 callers support  
+   n() > 1 &  all(grepl("TAxSTAR: identical|STARxCICERO: identical",breakpoint_comparison)) & 
+     any(grepl("Breakpoints.STAR", Algorithm)) ~ ifelse(grepl("Breakpoints.STAR", Algorithm), TRUE, FALSE),
+   n() > 1 & all(grepl("TAxCICERO: identical",breakpoint_comparison)) & 
+     any(grepl("Breakpoint.CICERO", Algorithm)) ~ ifelse(grepl("Breakpoint.CICERO", Algorithm), TRUE, FALSE),
+   
+   #Keep the one with at least +/- 5bp tolerance from STAR or CICERO since they are more modern.
+   n() > 1 & all(grepl("STARxCICERO: .+5bp_matched_breakpoints|TAxSTAR: .+5bp_matched_breakpoints",breakpoint_comparison)) & 
+     any(grepl("Breakpoints.STAR", Algorithm)) ~ ifelse(grepl("Breakpoints.STAR", Algorithm), TRUE, FALSE),
+   n() > 1 & all(grepl("TAxCICERO: .+5bp_matched_breakpoints",breakpoint_comparison)) & 
+     any(grepl("Breakpoint.CICERO", Algorithm)) ~ ifelse(grepl("Breakpoint.CICERO", Algorithm), TRUE, FALSE),
+   
+   #Each algorithm found the same breakpoints, but each one assigned different "strenght of read evidence" to each 
+   #so no shared "Primary Breakpoints"with the highest read evidence. 
+   n() > 1 & all(grepl("TAxSTAR: both_in_alternate_breakpoints|STARxCICERO: different_breakpoints",breakpoint_comparison)) & 
+     any(grepl("Breakpoints.STAR", Algorithm)) ~ ifelse(grepl("Breakpoints.STAR", Algorithm), TRUE, FALSE),
+   
+   # Conflicting evidence is difficult to decide - so just take STAR since its a more modern algorithm. 
+   n() > 1 & all(breakpoint_comparison == "TAxSTAR: different_breakpoints") & 
+     any(grepl("Breakpoints.STAR", Algorithm)) ~ ifelse(grepl("Breakpoints.STAR", Algorithm), TRUE, FALSE),
+   n() > 1 & all(breakpoint_comparison == "STARxCICERO: different_breakpoints") & 
+     any(grepl("Breakpoints.STAR", Algorithm)) ~ ifelse(grepl("Breakpoints.STAR", Algorithm), TRUE, FALSE)
+   )) %>% 
+  ungroup() %>%
+  dplyr::filter(keep) %>%
+
+  #Order breakpoints by Chr to avoid miscounting
+  #Will need to add a long and involved way to keep the original fusion name from the algorith (eg X.Fusion.STAR, Fusion.CICERO, etc.)
+  rowwise() %>%
+  mutate(Breakpoint_Order=order_breakpoints(Breakpoint)) %>%
+  ungroup() %>% 
+  arrange(Fusion.Category)
+
+
+
+head(ETS.primary.breakpoints)
+# dim(ETS.primary.breakpoints)
+table(ETS.primary.breakpoints$Algorithm)
+# breakpoint.TA Breakpoints.STAR 
+#             1               47 
+```
+
+
+```{r}
+ets.genes <- dplyr::select(ETS.fusions,GeneA,GeneB) %>%
+  gather(GenePartner, GeneName, GeneA:GeneB) %>%
+  pull(GeneName) %>%
+  unique() %>%
+  data.frame(geneSymbol=.) %>%
+  left_join(., IDmap, by="geneSymbol") %>% 
+  set_rownames(.$gene_id)
+
+dim(ets.genes)
+# length(unique(ets.genes$geneSymbol))
+```
+
+```{r}
+#For the exon ranking, i need the transcript isoform with a refseq ID - since they are highly stable and have a protein coding product that is typically the 'canonical' isoform
+#I am updating this to use the same refSeq accessions as Xioatu Ma who shared the original refSeq IDs - though I did update some out of necessity. 
+
+transcriptIDmap <- read.csv("Fusions/TARGET_AML_refSeq_ensembl_transcript_IDmap.csv") %>% 
+  filter(external_gene_name %in% ets.genes$geneSymbol) %>% 
+  add_row(ensembl_gene_id="ENSG00000100201",external_gene_name="DDX17", 
+          ensembl_transcript_id="ENST00000396821",refseq_mrna="NM_006386") %>% 
+  mutate(ETS_Family_Gene=ifelse(external_gene_name %in% ETS$Approved.Symbol,"Yes", "No")) %>% 
+  arrange(desc(ETS_Family_Gene))
+
+transcriptIDmap
+# View(transcriptIDmap)
+# dim(transcriptIDmap) 
+
+table(transcriptIDmap$ETS_Family_Gene)
+```
+
+
+## Exons of the Breakpoints 
+
+Notes About Orientation of fusion partners 5' and 3' 
+
+STAR:
+
+1)  Genes are listed as 'LeftGene' and 'RightGene'.  Is is always the case that in the fusion transcript that the 'LeftGene' is 5' relative to the 'RightGene'? 
+
+Yes, that should always be the case.
+
+ 
+2)  Is there a way to access the fusion RNA sequences that STAR-Fusion identifies as being fusions?
+
+The fusion sequences are not currently provided in the output, but we could aim to do this in a future version. The breakpoint coordinates and orientation are provided, so you could extract the sequences from the genome.
+
+ 
+3)  How could I determine the orientation of the genes involved in the fusion (for example if one gene was inverted before being fused to the other gene?
+
+Each fusion breakpoint is specified like so:  chr19:15443101:-  , formatted as:  'chr:coordinate:orient'
+and so you can figure out how they go together this way.  All you know in the output, though, is how the left and right gene go together, and it'll always be in the sense-sense orientation (as required by the software).
+
+
+TransAbyss:
+has columns that state 5' and 3' partner 
+also only includes sense fusions
+
+CICERO:
+
+
+
+```{r}
+ets.exon.ranges <- exonsBy(Grch37.txdb, by="tx", use.names=TRUE)[transcriptIDmap$ensembl_transcript_id]
+names(ets.exon.ranges) <- transcriptIDmap$external_gene_name
+
+
+length(ets.exon.ranges) #25 unique gene transcripts
+
+names(ets.exon.ranges)
+```
+
+```{r}
+ets.intron.ranges <- intronsByTranscript(Grch37.txdb, use.names=TRUE)
+ets.intron.ranges <- ets.intron.ranges[transcriptIDmap$ensembl_transcript_id]
+names(ets.intron.ranges) <- transcriptIDmap$external_gene_name
+
+ets.intron.ranges <- mcol_intron_rank(ets.intron.ranges)
+
+
+length(ets.intron.ranges) #25
+```
+
+
+```{r}
+ETS.primary.groups <- ETS.primary.breakpoints %>% 
+  separate(Breakpoint_Order, into=c("chromosomes_A",
+                              "pos_A",
+                              "chromosomes_B",
+                              "pos_B"), sep = "[:\\|]",
+           remove = F) %>%
+  ungroup() 
+# dim(ETS.primary.groups)
+
+source(file.path(SCRIPTS, "RNAseq_Analysis/fusBreakpoint/R/exon_annotation_functions.R"))
+ets.primary.breakpt.group <- purrr::map_dfr(pull(ETS.primary.groups, Sample), 
+                                            function(i){
+                                              df <- dplyr::filter(ETS.primary.groups, Sample==i)
+                                              define_exon_junctions(df, 
+                                                                    exon_ranges_GR = ets.exon.ranges,
+                                                                    intron_ranges_GR = ets.intron.ranges)
+                                              }) 
+
+
+dim(ets.primary.breakpt.group)  # 48 35
+head(ets.primary.breakpt.group)
+```
+
+```{r}
+table(ets.primary.breakpt.group$Algorithm)
+```
+
+```{r}
+ETS.primary.groups <- ets.primary.breakpt.group %>% 
+  left_join(., dplyr::select(ETS.fusions, Sample,X.Fusion.STAR,Fusion.TA), 
+            by="Sample") %>% 
+  mutate(gene.5=case_when(
+            Algorithm=="breakpoint.TA" ~ str_split_fixed(Fusion.TA,pattern = "-", n=2)[,1],
+            Algorithm=="Breakpoints.STAR" ~ str_split_fixed(X.Fusion.STAR,pattern = "-", n=2)[,1]), 
+        gene.3=case_when(
+            Algorithm=="breakpoint.TA" ~ str_split_fixed(Fusion.TA,pattern = "-", n=2)[,2],
+            Algorithm=="Breakpoints.STAR" ~ str_split_fixed(X.Fusion.STAR,pattern = "-", n=2)[,2])) %>% 
+  dplyr::select(Sample:Fusion.Category,gene.5,gene.3,
+                geneA, geneB,matches("exon_rank"), Exons,
+                everything())
+
+
+dim(ETS.primary.groups)
+# ETS.primary.groups
+```
+
+```{r}
+ETS.primary.groups.OK <- ETS.primary.groups %>%
+  filter(gene.5 == geneA)
+
+ETS.primary.groups.FIX <- ETS.primary.groups %>% 
+  filter(gene.5 != geneA) %>% 
+  dplyr::select(-Fusion,-Exons) %>%
+  rename_at(vars(matches("A$")), ~gsub("A$", "2", .)) %>%
+  rename_at(vars(matches("B$")), ~gsub("B$", "1", .)) %>%
+  rename_all(~gsub("1$","A", gsub("2$", "B", .))) %>%
+  mutate(Fusion=paste(geneA,geneB, sep="-"),
+         Exons=case_when(
+           !is.na(exon_rankA) & !is.na(exon_rankB) ~ paste(exon_rankA, exon_rankB, sep="_"),
+           !is.na(exon_rankA) & is.na(exon_rankB) ~ paste(exon_rankA, intron_rankB, sep="_"),
+           is.na(exon_rankA) & !is.na(exon_rankB) ~ paste(intron_rankA, exon_rankB, sep="_"),
+           is.na(exon_rankA) & is.na(exon_rankB) ~ paste(intron_rankA, intron_rankB, sep="_")))  
+
+
+# ETS.primary.groups.FIX
+
+ETS.primary.groups.clean <- ETS.primary.groups.OK %>% 
+  bind_rows(., ETS.primary.groups.FIX) %>% 
+  dplyr::select(-gene.5, -gene.3)
+
+
+dim(ETS.primary.groups.clean)
+head(ETS.primary.groups.clean)
+# write.csv(ETS.primary.groups.clean, "Fusions/TARGET_AML_ETS_Family_Fusions_Primary_Breakpoints_Exons_7.14.21.csv")
+```
+
+### Exons to Protein Domains
+
+```{r eval=FALSE}
+library(ensembldb)
+```
+
+
+
+
+
+## Tally Unique Number of Breakpoints
+
+```{r}
+# ETS_Fusion_Groups
+ETS.primary.groups.clean %>% 
+  dplyr::select(ETS_Fusion_Groups, Breakpoint) %>% 
+  group_by(ETS_Fusion_Groups, Breakpoint) %>% 
+  count() %>% 
+  ungroup() %>% 
+  
+  group_by(ETS_Fusion_Groups) %>% 
+  mutate(Total_Breapoints=n()) %>% 
+  arrange(ETS_Fusion_Groups, desc(n)) 
+
+
+```
+
+```{r}
+ETS.primary.groups.clean %>% 
+  dplyr::select(ETS_Fusion_Groups,Fusion,
+                Exons,everything()) %>% 
+  group_by(ETS_Fusion_Groups,Fusion, Exons) %>% 
+  count() %>% 
+  ungroup() %>% 
+  
+  group_by(ETS_Fusion_Groups) %>% 
+  mutate(Total_Breapoints=n())
+```
+
+## CIRCOS
+
+```{r}
+#Format for the circos - one primary breakpoint per sample  
+breakpoint_pos <- dplyr::select(ETS.fusions,Sample, Fusion.Category,
+                         breakpoint.TA,Breakpoints.STAR,Breakpoint.CICERO) %>% 
+  gather(Algorithm, Breakpoint,-Fusion.Category,-Sample) %>%
+  dplyr::filter(!is.na(Breakpoint)) %>%
+  arrange(Sample) %>% 
+  
+  #Order breakpoints by Chr to avoid miscounting
+  rowwise() %>%
+  mutate_at(vars(Breakpoint), ~order_breakpoints(.)) %>%
+  ungroup() %>% 
+
+  group_by(Breakpoint,Fusion.Category) %>%
+  summarise(N=n()) %>%
+  arrange(desc(N)) %>%
+  separate(Breakpoint, into=c("c",
+                              "links_pos_1",
+                              "links_chromosomes_2",
+                              "links_pos_2"), sep = "[:\\|]",
+           remove = F) %>%
+  mutate_at(vars(links_pos_1,links_pos_2), ~as.numeric(.)) 
+
+
+breakpoint_pos
+```
+
+```{r}
+breakpoint_pos <- ETS.primary.groups.clean %>% 
+  group_by(Breakpoint_Order, ETS_Fusion) %>% 
+  summarise(N=n()) %>%
+  arrange(ETS_Fusion, desc(N)) %>%
+  ungroup() %>% 
+  separate(Breakpoint_Order, into=c("links_chromosomes_1",
+                              "links_pos_1",
+                              "links_chromosomes_2",
+                              "links_pos_2"), sep = "[:\\|]",
+           remove = F) %>% 
+  mutate_at(vars(links_chromosomes_1:links_pos_2), as.numeric)
+
+breakpoint_pos
+```
+
+
+### Circlize 
+
+```{r}
+suppressPackageStartupMessages(library(circlize))
+```
+
+```{r}
+breakpoint_pos_circ <- breakpoint_pos %>% 
+  ungroup() %>% 
+  mutate_at(vars(links_chromosomes_1, links_chromosomes_2), ~paste0("chr", .))
+
+head(breakpoint_pos_circ)
+# dim(breakpoint_pos_circ)
+```
+
+```{r}
+#an idea for the width of the bands could be genomic TSS to breakpoint for geneA and breakpoint to TTS for geneB. 
+bed1 <- breakpoint_pos_circ %>%  
+ dplyr:: select(chr=links_chromosomes_1, 
+         start=links_pos_1, 
+         end=links_pos_1, 
+         value=N, 
+         ETS_Fusion) 
+
+
+bed2 <- breakpoint_pos_circ %>%  
+  dplyr::select(chr=links_chromosomes_2, 
+         start=links_pos_2, 
+         end=links_pos_2, 
+         value=N,
+         ETS_Fusion) 
+
+bed1 #the NUP98-NSD1 is getting condensed into a singe line. I can't find a way to deacrease "bin" size for the lines since the breakpoints are pretty similar overall. so need to s
+```
+
+```{r}
+ets_fusion_genes <- transcriptIDmap$ensembl_gene_id[transcriptIDmap$ETS_Family_Gene == "Yes"]
+ets.genes.ranges <- genes(Grch37.txdb)[ets_fusion_genes]
+
+mcols(ets.genes.ranges)$gene_name <- transcriptIDmap$external_gene_name[transcriptIDmap$ETS_Family_Gene == "Yes"]
+
+
+TSS <- ifelse(strand(ets.genes.ranges) == "+",
+              start(ets.genes.ranges),
+              end(ets.genes.ranges))
+ets.bed <- data.frame(chr=paste0("chr", ets.genes.ranges@seqnames),
+                           start=TSS,
+                           end=TSS,
+                           value=ets.genes.ranges$gene_name)
+
+ets.bed
+
+# partners.bed <- bed2 
+# 
+# partners.bed
+```
+
+
+```{r fig.height=10, fig.width=10}
+# pdf("Figures/TARGET_AML_ETS_Fusions_Circos_Circlize.pdf", height = 10, width = 10)
+circos.clear()
+circos.par("start.degree" = 90, "gap.degree"=2)
+circos.initializeWithIdeogram(ideogram.height=convert_height(1, "cm"),
+                              axis.labels.cex=0.5, labels.cex=2.0, major.by=50e6)
+
+circos.genomicLink(bed1, bed2, lwd=5,
+                   col=1:nrow(bed1))
+
+circos.genomicLabels(ets.bed, 
+                     labels.column = 4,
+                     side = "inside",
+                     niceFacing=TRUE,
+                     connection_height = convert_height(0.5,"cm"),
+                     padding=1.0,cex=1.2, font=4)
+
+
+# dev.off()
+```
+
+```{r}
+# bed = generateRandomBed(nr = 50, fun = function(k) sample(letters, k, replace = TRUE))
+# bed[1, 4] = "aaaaa"
+# circos.initializeWithIdeogram(plotType = NULL)
+# circos.genomicLabels(bed, labels.column = 4, side = "outside",
+#     col = as.numeric(factor(bed[[1]])), line_col = as.numeric(factor(bed[[1]])))
+# circos.genomicIdeogram()
+```
+
+#### Chordiagram
+
+https://jokergoo.github.io/circlize_book/book/the-chorddiagram-function.html
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+```
+
+```{r}
+fix_order <- function(fusion){
+  fusion <- unlist(str_split(fusion,pattern = "-"))
+  idx <- grepl("NUP98", fusion)
+  fus.order <- paste(fusion[idx],fusion[!idx], sep="-") 
+  return(fus.order)
+}
+```
+
+```{r}
+all_fusion_genes <- ETS.grps %>% 
+  pull(ETS_Fusion) %>% 
+  str_split(.,"-") %>% 
+  unlist() %>% 
+  unique()
+
+
+
+adjacency.list <- ETS.grps %>% 
+  dplyr::select(Sample, ETS_Fusion) %>% 
+  separate(ETS_Fusion,into=c("from_orig","to_orig")) %>% 
+
+  #Summarize for N of samples to be the width of the bands
+  group_by(from_orig, to_orig) %>%
+  summarize(value=n()) %>% 
+  ungroup() %>% 
+  mutate(value2=case_when(
+              # grepl("ERG|ETV6", from) ~ 2,
+              TRUE ~ 1)) %>% 
+  mutate(from=case_when(
+                  grepl("ERG|ETV6|FEV|FLI1", from_orig) ~ from_orig,
+                  grepl("ERG|ETV6|FEV|FLI1", to_orig) ~ to_orig), 
+         to=case_when(
+                 !grepl("ERG|ETV6|FEV|FLI1", from_orig) ~ from_orig,
+                 !grepl("ERG|ETV6|FEV|FLI1", to_orig) ~ to_orig)) %>% 
+  dplyr::select(from, to, value, value2) %>% 
+  arrange(desc(value))
+
+gene_order <- all_fusion_genes[!grepl("ERG|ETV6|FEV|FLI1", all_fusion_genes)]
+gene_order <- gene_order[order(gene_order)]
+gene_order <- c("ERG",  "ETV6", "FEV",  "FLI1", gene_order)
+
+# head(adjacency.list)
+# dim(adjacency.list)
+```
+
+
+```{r fig.height=10, fig.width=10, message=FALSE}
+colorVect <- rainbow(length(gene_order[-c(1:4)]),v=0.9,s=0.9)
+grid.col <- c("dodgerblue","mediumorchid", "turquoise2","turquoise4", colorVect)
+names(grid.col) <- gene_order
+
+#heights for the initial circos
+h <- unlist(dimnames(adjacency.list[,1:4]))
+
+# pdf("Figures/TARGET_AML_ETS_family_fusions_ChordDiagram.pdf",width = 10, height = 10)
+circos.par(start.degree = 150,gap.after=1,major.by.degree=50,track.margin=c(0.005, 0.005))
+chordDiagram(adjacency.list[,1:4],
+             annotationTrack = "grid",
+             preAllocateTracks = list(track.height = max(strwidth(h))),
+             grid.col, 
+             link.sort = TRUE,
+             link.decreasing = TRUE,
+             link.largest.ontop = TRUE,
+             # link.zindex=rank(adjacency.list$value)[order(adjacency.list$value, decreasing=T)],
+             # direction.type = c("arrows"),
+             # link.arr.type = "big.arrow",
+             # scale = TRUE,
+             
+             order=gene_order, 
+             directional = -1,
+             transparency=0.25,
+             link.border="black", 
+             link.lwd=2)
+
+circos.track(track.index = 1, panel.fun = function(x, y) {
+    circos.text(CELL_META$xcenter, CELL_META$ylim[1], CELL_META$sector.index,
+        facing = "clockwise", niceFacing = TRUE, adj = c(0, 0.5), cex = 1.0)
+}, bg.border = NA) # here set bg.border to NA is important
+
+circos.clear()
+# dev.off()
+```
+
+
+
+
+## GO ontology of Fusion partners
+
+https://www.bioconductor.org/packages/3.3/bioc/vignettes/annotate/inst/doc/GOusage.pdf
+
+```{r}
+all_fusion_genes <- ETS.grps %>% 
+  pull(ETS_Fusion) %>% 
+  str_split(.,"-") %>% 
+  unlist() %>% 
+  unique() %>% 
+  as.data.frame() %>% 
+  rename_all(~"gene_name") %>% 
+  left_join(., IDmap, by=c("gene_name"="geneSymbol"))
+
+
+# all_fusion_genes
+# write.csv(all_fusion_genes, "TARGET_AML_ETS_Family_Fusions_Gene_List.csv", row.names = FALSE)
+```
+
+```{r}
+ets.goslim <- read.csv("")
+head(ets.goslim)
+
+# unique(ets.goslim$Gene.name)
+```
+
+```{r}
+ets.goslim_cats <- ets.goslim %>% 
+  group_by(GOSlim.GOA.Accession.s.) %>% 
+  mutate(Num_Genes_in_GO=n(), 
+         Genes_Sharing_Term=paste(Gene.name, collapse="; ")) %>%
+  ungroup() %>% 
+  arrange(desc(Num_Genes_in_GO)) %>% 
+  dplyr::select(GOSlim.GOA.Accession.s.,GOSlim.GOA.Description,Num_Genes_in_GO,Genes_Sharing_Term) %>% 
+  distinct() %>% 
+  dplyr::filter(Num_Genes_in_GO>1)
+
+```
+
+
+
+
+#Session Information
+
+```{r}
+sessionInfo()
+```
+
+
+

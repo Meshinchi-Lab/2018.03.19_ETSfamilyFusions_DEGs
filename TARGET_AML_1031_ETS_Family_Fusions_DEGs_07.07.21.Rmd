@@ -1,0 +1,3018 @@
+---
+title: 'ETS Family Mutations and Fusions in 0531'
+author: "Jenny Smith"
+date: "July 7, 2021"
+output: html_document
+---
+
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME, '2018.03.19_ETSfamilyFusions_DEGs/'))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+
+library(dplyr)
+library(tibble)
+library(tidyr)
+
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+
+library(DeGSEA)
+library(edgeR)
+getwd()
+```
+
+# Define Functions
+
+```{r}
+# https://github.com/gaospecial/ggVennDiagram/blob/master/R/multi_implement.R
+multi_union <- function ( ...,l = NULL){
+  if (is.null(l)) l <- list(...)
+  n <- length(l)
+  if (n < 3){
+    stop("At least three parameters.")
+  }
+  else {
+    v <- l[[1]]
+    for (i in 2:n){
+      v <- union(v,l[[i]])
+    }
+    return(v)
+  }
+}
+
+#' @rdname multi
+multi_intersect <- function ( ...,l = NULL){
+  if (is.null(l)) l <- list(...)
+  n <- length(l)
+  if (n < 3){
+    stop("At least three parameters.")
+  }
+  else {
+    v <- l[[1]]
+    for (i in 2:n){
+      v <- intersect(v,l[[i]])
+    }
+    return(v)
+  }
+}
+
+
+#' @rdname multi
+multi_setdiff <- function(...,l=NULL){
+  if (is.null(l)) l <- list(...)
+  n <- length(l)
+  if (n < 3){
+    stop("At least three parameters.")
+  }
+  else {
+    v <- l[[1]]
+    for (i in 2:n){
+      v <- setdiff(v,l[[i]])
+    }
+    return(v)
+  }
+}
+```
+
+
+```{r}
+extract_gage_res <- function(GAGE_GSA_results){
+  
+    res <- GAGE_GSA_results
+    up_and_down_dfs <- list()
+    for(dir in c("Up","Dn")){
+      esset <- res[[paste0("essSets.", dir)]]$essentialSets
+      gage_df <- res[[paste0("SigPaths.",dir)]] %>% 
+        as.data.frame() %>% 
+        rownames_to_column("pathway")
+      
+      if(!is.null(esset)){
+        core_genes <- res[[paste0("essSets.", dir)]]$coreGeneSets %>% 
+                      lapply(., paste, collapse="; ") %>% 
+                      as.data.frame(check.names=FALSE) %>% 
+                      gather(pathway, pathway_genes) 
+        gage_df <- gage_df %>% 
+            filter(pathway %in% esset) %>%
+            left_join(., core_genes, by="pathway")
+      }
+      up_and_down_dfs[[dir]] <- gage_df
+      
+    }
+    
+    output <- bind_rows(up_and_down_dfs) %>% 
+      select(pathway,
+             c(p.geomean:set.size),
+             matches("pathway_genes"),
+             everything())
+    return(output)
+  
+}
+```
+
+
+# ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv"),
+                   na.strings = c("#N/A", "NA", ".",""))
+
+inelig <- merged %>% 
+  filter(Eligibility_Comments == "remove") %>% 
+  pull(USI)
+
+merged <- merged %>% 
+  filter(!grepl("Unknown", USI)) %>%
+  filter(Eligibility_Comments != "remove")
+
+
+dim(merged) #2217  150
+```
+
+```{r}
+sample_info <- read.csv(file.path(TARGET,
+                                    "SequencingDataMatrix/TARGET_AML_Ribodepleted_Manifest_08.12.21.csv")) 
+
+dim(sample_info)
+table(sample_info$Batch)
+```
+
+
+
+# Expression Data
+
+```{r}
+cts <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_JMML_APL_DS_MDAnderson_Kallisto_Quant_GeneLevel_dupGenesRemoved_scaledTPM_counts.RDS"))
+colnames(cts)[grep("PATGIG|PATISD", colnames(cts))] <- gsub("_replicate", "", grep("PATGIG|PATISD", colnames(cts), value=T))
+
+geneIDs <- cts[,1:2]
+rownames(cts) <- cts$gene_name
+cts <- cts[,-c(1:2)]
+
+dim(cts) #58263  3021
+# head(cts[,1:5]) #58263
+```
+
+```{r}
+TPM <- readRDS(file.path(PROJHOME,"0000.00.03_ExpressionMatrices/Kallisto_GRCh38_Gencode_v29/TARGET_AML_RBD_Dx_Rlps_NBM_MPN_JMML_APL_DS_MDAnderson_Kallisto_Quant_GeneLevel_dupGenesRemoved_Abundance_TPM.RDS"))
+colnames(TPM)[grep("PATGIG|PATISD", colnames(TPM))] <- gsub("_replicate", "", grep("PATGIG|PATISD", colnames(TPM), value=T))
+
+
+geneIDs.tpm <- TPM[,1:2]
+rownames(TPM) <- TPM$gene_name
+TPM <- TPM[,-c(1:2)]
+
+
+# dim(TPM) #58263  3021
+head(TPM[,1:5])
+```
+
+
+# Gene Annotations
+
+```{r}
+geneIDmap <- read.delim(file.path(PROJHOME,"0000.00.02_Reference_GeneInfo/gencode.v29_RepBase.v24.01_GeneLevel_IDmap_anno_5.14.21.txt")) %>% 
+  dplyr::filter(gene_id %in% geneIDs$gene_id)
+
+dim(geneIDmap) # 58263    23
+# View(geneIDmap)
+```
+
+```{r}
+ETS <- read.csv(file.path(HOME, "0000.00.02_Reference_GeneInfo/ETS_transcription_factor_family_HGNC.csv"), 
+                stringsAsFactors = FALSE)
+head(ETS)
+# dim(ETS) #28  5
+# View(ETS)
+
+ETS.re.genes <- paste(paste0("^", c("ETS",ETS$Approved.Symbol),"$"), collapse = "|")
+ETS.re <- paste( c("ETS",ETS$Approved.Symbol), collapse = "|")
+```
+
+
+# Select Patient Cohort
+
+Groups:
+1) ETV6-MNX1
+2) FUS-ERG
+3) ETV6-Other
+4) ETS-Other
+
+
+PARJGD	AAML0531	ETV6-NTRK3 should be RNAseq only
+
+```{r}
+samples <- read.csv("TARGET_AML_ETS_Family_Fusions_Cohort_7.7.21.csv") %>% 
+  mutate_at(vars(ETS_Fusion_Groups), ~gsub("ERG-HNRNPH1","HNRNPH1-ERG", .)) %>% 
+  mutate(Age.Category=ifelse(is.na(Age.Category), Group, Age.Category)) %>% 
+  mutate_at(vars(Age.Category), ~factor(., levels=c("Less than 3 years",
+                                                    "Between 3 and 5 years",
+                                                    "Between 5 and 10 years",
+                                                    "Between 10 and 18 years",
+                                                    "Greater than 18 years",
+                                                    "NBM","CD34_PB")))
+
+
+dim(samples)
+table(samples$ETS_Fusion_Groups)
+table(samples$Age.Category)
+```
+
+
+```{r eval=FALSE}
+# samples <- sample_info %>% 
+#   filter(grepl("CD34|NBM|^AML$|flow", Group),
+#          grepl("CD34|NBM|diagnostic", Time_point), 
+#          !grepl("_replicate", Sample)) %>% 
+#   
+#   #Fix the reciprocals
+#   mutate_at(vars(Primary.Fusion), ~gsub("ERG-HNRNPH1", "HNRNPH1-ERG", Primary.Fusion)) %>% 
+#   
+#   # I cannot figure out if TCF25 IS or is not an ETS or ETS subfamily gene. uggh.
+#   #but looks like its NOT an ETS gene since ternary complex factors (TCF) genes have ETS domain.
+#   mutate_at(vars(AML_Subtype), ~ifelse(Primary.Fusion=="FUS-TCF25", "AML, NOS", .)) %>% 
+#   
+#   
+#   #Define the ETS fusion column for those patients who had ETS-fusion as an additional fusoin.
+#   #So cohort fusions can be found in one column
+#   mutate(ETS_Fusion=case_when(
+#     # AML_Subtype == "ETS-Fusion" &  grepl(ETS.re,Primary.Fusion) ~ Primary.Fusion,
+#     grepl(ETS.re,Primary.Fusion) ~ Primary.Fusion,
+#     # AML_Subtype == "ETS-Fusion" &  grepl(ETS.re,Additional.Fusions.CNV) ~ Additional.Fusions.CNV,
+#     grepl(ETS.re,Additional.Fusions.CNV) ~ Additional.Fusions.CNV,
+#     grepl("CD34|NBM", Group) ~ Group,
+#     TRUE ~ "OtherAML")) %>% 
+#   #ETS deletions by karyotype only N=3. often (2/3)  co-occur with other driver fusions. so dont consider them to ETV6 fusions.
+#   mutate_at(vars(ETS_Fusion), ~case_when(
+#     grepl("ETV6 \\(deletion\\)", .) ~ "OtherAML",
+#     TRUE ~ .)) %>% 
+#   mutate_at(vars(AML_Subtype), ~case_when(
+#     ETS_Fusion=="OtherAML" & .=="ETS-Fusion" & grepl("KMT2A", Primary.Fusion) ~ "KMT2A", 
+#     ETS_Fusion=="OtherAML" & .=="ETS-Fusion" ~ "AML, NOS", 
+#     TRUE ~ .)) %>% 
+#   
+#   #Define binary columns for the DE analysis
+#   mutate(FUS.ERG=case_when(
+#                 ETS_Fusion=="FUS-ERG" ~ "Yes",
+#                 grepl("CD34|NBM", Group) ~ Group,
+#                 ETS_Fusion=="OtherAML" ~ "OtherAML"),
+#          ERG.HNRNPH1=case_when(
+#                ETS_Fusion=="HNRNPH1-ERG" ~ "Yes",
+#                grepl("CD34|NBM", Group) ~ Group,
+#                ETS_Fusion=="OtherAML" ~ "OtherAML"),
+#          ETV6.MNX1=case_when(
+#                 ETS_Fusion=="ETV6-MNX1" ~ "Yes",
+#                 grepl("CD34|NBM", Group) ~ Group,
+#                 ETS_Fusion=="OtherAML" ~ "OtherAML"),
+#          ETV6.Other=case_when(
+#                 grepl("ETV6", ETS_Fusion) & ETS_Fusion != "ETV6-MNX1" ~ "Yes",
+#                 grepl("CD34|NBM", Group) ~ Group,
+#                 ETS_Fusion=="OtherAML" ~ "OtherAML"),
+#          ETS.Other=case_when(
+#                   grepl("CD34|NBM", Group) ~ Group,
+#                   !grepl("FUS-ERG|ETV6|HNRNPH1-ERG", ETS_Fusion) & ETS_Fusion != "OtherAML" ~ "Yes", #May consider having to pull out ERG-HNRNP1 due N=8, so half of this cohort.
+#                   ETS_Fusion=="OtherAML" ~ "OtherAML")) %>% 
+#     
+#   #Define ETS fusion groups for outcome/clinical and data visualization
+#   mutate(ETS_Fusion_Groups=case_when(
+#                 grepl("CD34|NBM", Group) ~ Group,
+#                 ETS_Fusion=="FUS-ERG" ~ ETS_Fusion,
+#                 ETS_Fusion=="ETV6-MNX1" ~ ETS_Fusion,
+#                 ETS_Fusion=="HNRNPH1-ERG" ~ ETS_Fusion,
+#                 grepl("ETV6", ETS_Fusion) & ETS_Fusion != "ETV6-MNX1" ~ "ETV6-Other",
+#                 !grepl("FUS-ERG|ETV6|HNRNPH1-ERG", ETS_Fusion) & ETS_Fusion != "OtherAML" ~ "ETS-Other",
+#                 ETS_Fusion=="OtherAML" ~ "OtherAML")) %>% 
+#   
+#   left_join(., select(merged,-ETS_Fusion, -Protocol,-Group, 
+#                       -Primary.Fusion,-Primary.CNV, -Additional.Fusions.CNV),
+#             by="USI") %>% 
+#   mutate_at(vars(Cyto_vs_Seq_Fusions), ~ifelse(USI=="PARJGD", "RNA seq only", .)) %>% 
+#   mutate_at(vars(Age.Category), ~factor(., levels=c("Less than 3 years", 
+#                                                     "Between 3 and 5 years", 
+#                                                     "Between 5 and 10 years",
+#                                                     "Between 10 and 18 years",
+#                                                     "Greater than 18 years"))) %>% 
+#   
+#   
+#   filter(Sample %in% colnames(cts)) %>% 
+#   filter(!USI %in% inelig) %>% 
+#   mutate_at(vars(SNVs, Mutations.Category), ~ifelse(is.na(.), Group, .)) %>% 
+#   select(Reg., USI,ETS_Fusion,ETS_Fusion_Groups,FUS.ERG:ETS.Other, everything()) %>% 
+#   set_rownames(.$Sample)
+# 
+# 
+# dim(samples) #1567  165
+# # table(samples$Group)
+# # table(samples$AML_Subtype)
+# # head(samples)
+# # table(samples$SNVs)
+# # write.csv(samples,"TARGET_AML_ETS_Family_Fusions_Cohort_7.7.21.csv", row.names = FALSE)
+```
+
+
+```{r}
+ETS.only <- samples %>% 
+  filter(grepl("ETS-Fusion", AML_Subtype)) %>% 
+  arrange(ETS_Fusion_Groups,ETS_Fusion) 
+
+
+dim(ETS.only)
+# write.csv(select(ETS.only, USI, Protocol, ETS_Fusion,ETS_Fusion_Groups,
+#                  Primary.Fusion,
+#             Additional.Fusions.CNV,Cyto_vs_Seq_Fusions,
+#             ISCN), "TARGET_AML_ETS_Fusion_Cohort_Check.csv",row.names = FALSE)
+
+# table(ETS.only$SCT.in.1st.CR)
+# table(ETS.only$MRD.at.end.of.course.1)
+```
+
+```{r}
+# ETS.only %>% 
+#   filter(grepl("HN", ETS_Fusion_Groups)) %>% 
+#   select(Sample, EFS.event.type.ID, OS.event.ID, SCT.in.1st.CR) %>% 
+#   arrange(SCT.in.1st.CR)
+```
+
+
+```{r}
+forCOG <- samples %>% 
+  filter(!grepl("NBM|CD34", Group)) %>% 
+  select(Reg., USI,Protocol, ETS_Fusion_Groups, SCT.in.1st.CR) %>% 
+  arrange(ETS_Fusion_Groups, SCT.in.1st.CR)
+
+
+# forCOG
+# write.csv(forCOG, "TARGET_AML_ETS_Family_Fusions_forOutcome_Reg_7.26.21.csv", row.names = FALSE)
+```
+
+```{r}
+# forCOG %>%
+#   group_by(ETS_Fusion_Groups, SCT.in.1st.CR) %>%
+#   summarize(Number_who_recieved_SCT.in.1st.CR=n()) %>% 
+#   pivot_wider(names_from = ETS_Fusion_Groups, values_from=c(Number_who_recieved_SCT.in.1st.CR)) %>% 
+# write.csv(.,"ETS_Fusions_SCT_Table.csv")
+
+```
+
+## Discrepancies
+
+```{r}
+official <- openxlsx::read.xlsx(file.path(TARGET,"Clinical/metadata/CDE_documents_from_COG/AAML1031_TARGET_format_033119.xlsx"),check.names=FALSE, sep.names = " ")
+
+head(official[,1:5])
+```
+
+```{r}
+Oct.2018 <- read.csv(file.path(CDE,"00_Archive/1031/Old_versions/AAML1031_TARGET_CDEs_with_HiAR_PrimaryCyto_and_FusionCalls_10.11.18.csv"))
+
+head(Oct.2018[,1:5])
+```
+
+
+```{r}
+June.2018 <- openxlsx::read.xlsx(file.path(CDE,"00_Archive/1031/Old_versions/AAML1031_TARGET_CDE_format_033118_with_addl_HiAR_FLT3_pts.xlsx"))
+
+head(June.2018[,1:5])
+```
+
+```{r}
+Nov.2017 <- openxlsx::read.xlsx(file.path(CDE,"00_Archive/1031/Old_versions/AAML1031_CDEs_with_fusions_and_updated_risk_groups_11302017.xlsx"))
+
+head(Nov.2017[,1:5])
+```
+
+
+```{r}
+SCT.FUS.ERG <- forCOG %>% 
+  filter(ETS_Fusion_Groups=="FUS-ERG",SCT.in.1st.CR=="Yes")
+
+SCT.FUS.ERG
+```
+
+```{r}
+FUS.ERG.official <- official %>% 
+  filter(`Patient registration number` %in% SCT.FUS.ERG$Reg.) %>% 
+  select(`Study`:`Patient registration number`,Sex, `Age in days at enrollment`, `Year of Last Follow Up`, `SCT in 1st CR`, ISCN) %>% 
+  arrange(`Patient registration number`)
+
+
+# write.csv(FUS.ERG.official, "AAML1031_TARGET_format_033119_FUS.ERG_with_SCT.csv", row.names = FALSE)
+```
+
+```{r}
+FUS.ERG.merged <- merged %>% 
+  filter(Reg. %in% SCT.FUS.ERG$Reg.) %>% 
+  select(Reg., USI, Protocol, Sex, Age.in.days, Year.of.Last.Follow.Up,SCT.in.1st.CR, Primary.Fusion,  ISCN)
+
+# write.csv(FUS.ERG.merged, "TARGET_AML_Merged_CDEs_FUS.ERG._withSCT.csv", row.names = FALSE)
+```
+
+```{r}
+Oct.2018 %>% 
+  filter(Patient.registration.number %in% SCT.FUS.ERG$Reg.) %>% 
+  select(USI:Study,Year.of.Last.Follow.Up, Age.in.days, SCT.in.1st.CR, FOI, ISCN) %>% 
+  arrange(Patient.registration.number)
+```
+
+```{r}
+June.2018 %>% 
+  filter(Patient.registration.number %in% SCT.FUS.ERG$Reg.) %>% 
+  arrange(Patient.registration.number)
+```
+
+```{r}
+Nov.2017 %>% 
+  filter(Patient.ID %in% SCT.FUS.ERG$Reg.) %>% 
+  select(Patient.ID:`Primary.Fusion(s)`,Treatment.Arm, Age..Days.,Karyotype) %>% 
+  arrange(Patient.ID)
+
+```
+
+
+
+
+# Subset Counts 
+
+```{r}
+in_cts <- cts[,samples$Sample]
+
+
+AML <- ! grepl("BM[0-9]|R[O0][0-9]", colnames(in_cts))
+keep <- rowSums(cpm(in_cts[,AML]) >= 1) >= 0.025*ncol(in_cts[,AML])
+cts.filtered <- in_cts[keep, ]
+
+dge <- DGEList(counts=cts.filtered)
+dge <- calcNormFactors(dge,method = "TMMwsp")
+
+logCPM <- edgeR::cpm(dge,log=TRUE,normalized.lib.sizes=TRUE, prior.count=1)
+CPM <- edgeR::cpm(dge,log=FALSE,normalized.lib.sizes=TRUE, prior.count=1)
+
+dim(logCPM) #
+head(logCPM[,1:5])
+```
+
+
+```{r}
+# ETS.only %>%
+#   group_by(ETS_Fusion) %>%
+#   count() %>%
+#   ungroup() %>%
+#   arrange(desc(n))
+
+#There are 4 with notable co-occuring mutations that need to be checked 
+# ETS.only %>% 
+#   filter(grepl("KMT2A-MLLT3|NUP98-HOXD13|PICALM-MLLT10|DEK-NUP214", Primary.Fusion))
+```
+
+
+# Examine Exon Breakpoints
+
+```{r}
+exons_df <- read.csv("Fusions/TARGET_AML_ETS_Family_Fusions_Primary_Breakpoints_Exons_7.14.21.csv", row.names = 1)
+
+dim(exons_df)
+head(exons_df)
+```
+
+```{r}
+# exons_df %>% 
+#   filter(grepl("ETV6-NTRK3", ETS_Fusion))
+```
+
+```{r}
+ETS.exons <- ETS.only %>% 
+  left_join(., select(exons_df,-ETS_Fusion, -ETS_Fusion_Groups),
+            by="Sample") %>% 
+  select(USI, Age.Category,ETS_Fusion, ETS_Fusion_Groups,Fusion.Category,
+         geneA:Breakpoint_Order,
+         everything())
+
+
+dim(ETS.exons)  
+head(ETS.exons)
+```
+
+```{r}
+ETV6.subset <- ETS.exons %>% 
+  filter(grepl("ETV6", geneA) | grepl("ETV6", geneB)) %>% 
+  arrange(ETS_Fusion_Groups, Exons) %>% 
+  mutate(E12.Hits=case_when(
+    grepl("1_|2_", Exons) & geneA == "ETV6" ~ TRUE,
+    grepl("_1$|_2$", Exons) & geneB == "ETV6" ~ TRUE,
+    TRUE ~ FALSE))
+
+# ETV6.subset
+ETV6.subset
+dim(ETV6.subset)
+table(ETV6.subset$E12)
+```
+
+```{r}
+FUS.subset <- ETS.exons %>% 
+  filter(grepl("FUS", geneA) | grepl("FUS", geneB)) %>% 
+  arrange(ETS_Fusion_Groups, Exons) %>% 
+  mutate(E7.Hits=grepl("7_",Exons))
+
+table(FUS.subset$E7.Hits)
+```
+
+```{r}
+ERG.subset <- ETS.exons %>% 
+  filter(grepl("ERG", geneA) | grepl("ERG", geneB)) %>% 
+  arrange(ETS_Fusion_Groups, Exons) %>% 
+  mutate(E10.Hits=grepl("10_|_10$", Exons)) 
+
+
+dim(ERG.subset)
+table(ERG.subset$E10.Hits, ERG.subset$ETS_Fusion)
+
+table(ERG.subset$ETS_Fusion, ERG.subset$Exons)
+```
+
+```{r}
+FLI1.FEV <-  ETS.exons %>% 
+  filter(grepl("FLI1|FEV", geneA) | grepl("FLI1|FEV", geneB)) %>% 
+  arrange(ETS_Fusion_Groups, Exons) 
+  # mutate(E10.Hits=grepl("10_|_10$", Exons))
+
+# FLI1.FEV
+
+table(FLI1.FEV$ETS_Fusion, FLI1.FEV$Exons)
+```
+
+
+```{r}
+#Exclude these from now on
+ETS.del <- samples %>% 
+  filter(grepl("ETV6 \\(deletion\\)", Primary.Fusion) | grepl("ETV6 \\(deletion\\)", Additional.Fusions.CNV)) %>% 
+  select(USI, ISCN, Primary.Fusion, Additional.Fusions.CNV)
+# ETS.del
+```
+
+
+ETV6 has breakpoint hotspot in exons 1-3 (esp. E2) (15/21 ETV6 fusions)
+ERG has breakpoint hotspot in exon 10 (15/20 ERG fusions fusions)
+FEV has a breakpoint hotspon in exon 2
+FUS has a breakpoint hotspot in exon 7 (11/13 FUS fusions)
+
+FUS-ERG has consistent breakpoints in Exon 7 to Exon 10/7 of ERG (9/10)
+HNRNPH1-ERG has consistent breakpoints (7/8) in Exon 10 Erg to Exon 4 HNRNPH1
+HNRNPH1-ERG is entirely cryptic and FUS-ERG is entirely karyotypic. 
+HNRNPH1-ERG has much better outcomes than FUS-ERG. 
+
+
+MNX1-ETV6 orientation (5' partner - 3' partner) only seen in literature + RNAseq
+ETV6-Other has 13/20 with ETV6 as the 5' partner 
+
+
+
+# Age of ETS Fusions
+
+```{r}
+age.df <-  ETS.only %>% 
+  select(ETS_Fusion_Groups, Age.Category) %>% 
+  group_by(ETS_Fusion_Groups, Age.Category, .drop = FALSE) %>% 
+  summarize(N=n()) %>% 
+  ungroup() %>% 
+  
+  group_by(ETS_Fusion_Groups) %>% 
+  mutate(Total=sum(N)) %>% 
+  ungroup() %>% 
+  
+  group_by(ETS_Fusion_Groups, Age.Category) %>% 
+  mutate(Percent=round(N/Total*100, digits=2)) %>% 
+  ungroup() %>% 
+  
+  mutate_at(vars(ETS_Fusion_Groups), ~factor(.,
+                                             levels=c("ETV6-MNX1","ETV6-Other",
+                                                      "FUS-ERG","HNRNPH1-ERG", "ETS-Other")))
+
+
+# head(age.df)
+# View(age.df)
+age.df
+```
+
+```{r}
+t <- table(ETS.only$ETS_Fusion_Groups)
+t[-grep("ETV6", names(t))]
+sum(t[-grep("ETV6", names(t))])
+```
+
+```{r}
+age.df %>% 
+  ungroup() %>% 
+  filter(grepl("ETS|ERG", ETS_Fusion_Groups), grepl("Between 5 and 10 years|Between 10 and 18 years", Age.Category)) %>% 
+  mutate(Total_5to18=sum(N))
+  # mutate(Total_5to18=case_when(
+  #   grepl("Between 5 and 10 years|Between 10 and 18 years", Age.Category) ~ sum(N)
+  # ))
+
+19/26*100
+```
+
+
+```{r fig.width=10, fig.height=4}
+ colors <- RColorBrewer::brewer.pal(n=5,"PiYG")
+colors[3] <- "khaki2"
+
+# pdf("Figures/TARGET_AML_ETS_Family_Fusions_Age_barplot.pdf", height = 6, width = 9)
+ggplot(age.df, aes(x=ETS_Fusion_Groups, y=Percent, fill=Age.Category)) + 
+  geom_col(position = position_dodge(), color="black") +
+  theme_classic() +
+  labs(y="Percent (%)", x="ETS Fusion Group") +
+  scale_fill_manual(values=colors) +
+  guides(fill=guide_legend(ncol=2)) +
+  theme(axis.text.y = element_text(size=18, color="black"), 
+        axis.text.x = element_text(size=16, color="black"), 
+        axis.title = element_text(size=20, color="black", face="bold"),
+        legend.text = element_text(size=18),
+        legend.title = element_blank(),
+        legend.position = "top")
+
+
+# dev.off()
+```
+
+```{r}
+# ggplot(age.df, aes(x=Age.Category , y=Percent, fill=ETS_Fusion_Groups)) + 
+#   geom_col(position = position_dodge(), color="black") +
+#   theme_classic() +
+#   # labs(y="Percent (%)", x="ETS Fusion Group") +
+#   theme(axis.text = element_text(size=12, color="black"), 
+#         axis.title = element_text(size=16, color="black"))
+```
+
+## FUS-ERG in Adult 
+
+It looks like there are zero FUS-ERG fusions in the adult AML despite FUS-ERG being one of the few ETS fusions with > 18 year old patients. 
+
+```{r}
+ETS.only %>% 
+  select(ETS_Fusion_Groups, Age.Category, Age.in.years) %>% 
+  filter(ETS_Fusion_Groups=="FUS-ERG") %>% 
+  arrange(desc(Age.in.years))
+```
+
+```{r}
+# swog.CDE <- read.csv(file.path(SWOG,"Clinical/CDE/Merged/SWOG_AML_Merged_CDEs_2.20.20.csv"))
+
+swog.ets <- read.csv(file.path(SWOG,"RNA/mRNAseq/analysis/2020.01.24_STAR-Fusion/SWOG_AML_RNAseq_STAR_Fusion_per_patient.csv"))  %>% 
+  mutate(ERG.Fusion=case_when(
+    grepl("ERG|ETV6|FUS|FLI1", interchromosomal.STAR) ~ "Yes",
+    TRUE ~ "No")) %>% 
+  filter(!duplicated(SWOGID)) %>%
+  mutate(Cohort="SWOG")
+
+
+head(swog.ets)
+dim(swog.ets) #223
+table(swog.ets$ERG.Fusion)
+# swog.ets$interchromosomal.STAR
+swog.ets %>% 
+  filter(ERG.Fusion=="Yes")
+```
+
+```{r}
+beat.aml.CDEs <- read.csv(file.path(BEATAML,"RNA/mRNAseq/analysis/2020.11.04_Cat_STAR_Fusion/BEAT_AML_STAR-aligner_GCD_Data_Manifest_with_CDE_11.04.20.csv")) %>%  
+  filter(!grepl("COG",cumulativeTreatmentRegimens_SuppTable),
+         !grepl("relapse",NUP98.Rearranged),
+         !grepl("NBM", NUP98.Rearranged)) %>%
+  mutate(ERG.Fusion=case_when(
+    grepl("ERG|ETV6|FUS|FLI1", interchromosomal.STAR) ~ "Yes",
+    TRUE ~ "No")) %>% 
+  mutate(Cohort="BEAT AML")
+  
+head(beat.aml.CDEs)
+# dim(beat.aml.CDEs) # 440 254
+
+
+table(beat.aml.CDEs$FUS.ERG) #1
+
+
+beat.aml.CDEs %>% 
+  filter(ERG.Fusion=="Yes")
+```
+
+```{r}
+laml <- read.csv(file.path(TOIL,"Clinical/TCGA_AML_updated_NEJM_SuppTable01_12.28.20.csv")) %>% 
+  filter(RNAseq.data.=="Yes") %>% 
+  mutate_at(vars(Cytogenetics), ~case_when(
+    grepl("^N|incomp|Outside",.) ~ "Unknown",
+    TRUE ~ .
+  )) %>% 
+  mutate(TCGA.Patient.ID=as.character(TCGA.Patient.ID)) %>% 
+  mutate(Cohort="TCGA LAML") %>% 
+  mutate(ETS.Fusion=case_when(
+    grepl("ERG|ETV6|FUS|FLI1", Gene.Fusions.by.RNA.Seq) ~ "Yes",
+    TRUE ~ "No")) 
+
+table(laml$ETS.Fusion)
+dim(laml)
+# laml$Gene.Fusions.by.RNA.Seq
+```
+
+```{r}
+#t(16;21)(p11;q22) FUS/ERG
+table(laml$Cytogenetics == "Unknown") #175 ISCN
+table( beat.aml.CDEs$Karyotype_SuppTable == "Unknown") #437 ISCN
+
+
+grep("t\\(16", laml$Cytogenetics, value=TRUE) #FUS-ERG 0
+grep("t\\(16",  beat.aml.CDEs$Karyotype_SuppTable, value=TRUE) #FUS-ERG 0
+```
+
+
+
+# Outcome
+
+```{r}
+in_df <- samples %>% 
+  filter(!is.na(EFS.time..days.)) %>% 
+  mutate(ETS_vs_OtherAML=ifelse(ETS_Fusion_Groups=="OtherAML", ETS_Fusion_Groups, "ETS Fusion"), 
+         ETS_vs_Risk.Group=factor(ifelse(ETS_vs_OtherAML=="OtherAML", Cyto.Fusion.Molecular.Risk_update, ETS_vs_OtherAML), 
+                                  levels=c("High","Standard","Low","ETS Fusion")))
+
+dim(in_df)
+# table(in_df$ETS_vs_OtherAML)
+# table(in_df$ETS_vs_Risk.Group)
+table(in_df$ETS_Fusion_Groups, 
+      in_df$SCT.in.1st.CR)
+
+```
+
+```{r}
+cc <- c("CD34_PB"="grey40",
+        "NBM"="black",
+        "ETS-Other"="darkturquoise",
+        "ETV6-MNX1"="darkorchid1",
+        "ETV6-Other"="darkorchid4",
+        "HNRNPH1-ERG"="firebrick2",
+        "FUS-ERG"="dodgerblue1",
+        "OtherAML"="navy")
+```
+
+```{r}
+KM.ETS <- KM.plots(df=in_df,
+                   group_vars = NULL,
+                   type = "OS",
+                   covariate = "ETS_Fusion_Groups",
+                   cohort = "1031",
+                   cc = cc[-c(1:2)])
+```
+
+```{r fig.height=7, fig.width=15}
+# pdf("Outcome_and_Characteristics/TARGET_AML_ETS_Family_Fusions_KM_plot.pdf", height = 7, width = 15)
+grid.arrange(grobs=c(KM.ETS$OS, KM.ETS$EFS), ncol=2)
+# dev.off()
+```
+
+HNRNPH1 is a member of the spliceosome. Don't spliceosome mutations have improved outcomes??
+
+- eh HNRNPH1-ERG actually has like 70% SCT rate... so why?? 
+- its because 6/8 were on 1031 and 70% had MRD+ after course 1 so were classified as high risk and went to SCT. 
+
+
+Look at relapse after SCT for different fusion groups or the group as a whole. 
+
+## All ETS Fusions 
+
+```{r}
+cc_simple <- c("OtherAML"="navy", "ETS Fusion"="firebrick1")
+
+KM.ETS.all <- KM.plots(df=in_df,
+                   group_vars = NULL,
+                   type = "OS",
+                   covariate = "ETS_vs_OtherAML",
+                   cohort = "1031",
+                   cc = cc_simple)
+```
+
+```{r fig.height=7, fig.width=15}
+# pdf("Outcome_and_Characteristics/TARGET_AML_ETS_Family_Fusions_OneGroup_KM_plot.pdf", height = 7, width = 15)
+grid.arrange(grobs=c(KM.ETS.all$OS, KM.ETS.all$EFS), ncol=2)
+# dev.off()
+```
+
+## By Risk Group
+
+```{r}
+cc_RG <- c("High"="tomato","Standard"="darkgoldenrod2","Low"="deepskyblue1", "ETS Fusion"="firebrick4")
+
+
+input <- in_df %>% 
+  filter(!grepl("Yes|Unknown", SCT.in.1st.CR))
+
+KM.ETS.RG <- KM.plots(df=input,
+                   group_vars = NULL,
+                   type = "OS",
+                   covariate = "ETS_vs_Risk.Group",
+                   cohort = "1031",
+                   cc = cc_RG)
+```
+
+```{r fig.height=7, fig.width=15}
+# pdf("Figures/KM_plots/TARGET_AML_ETS_Family_Fusions_OneGroup_KM_by_CytoMolRiskGroup_plot.pdf", height = 7, width = 15)
+grid.arrange(grobs=c(KM.ETS.RG$OS,KM.ETS.RG$EFS), ncol=2)
+# dev.off()
+```
+
+```{r}
+cc_RG <- c("High"="tomato","Standard"="darkgoldenrod2","Low"="deepskyblue1", "ETS Fusion"="firebrick4")
+
+
+input_SCT <- in_df %>% 
+  filter(grepl("Yes", SCT.in.1st.CR))
+
+KM.ETS.RG.SCT <- KM.plots(df=input_SCT,
+                   group_vars = NULL,
+                   type = "OS",
+                   covariate = "ETS_vs_Risk.Group",
+                   cohort = "1031",
+                   cc = cc_RG)
+```
+
+```{r}
+# table(input_SCT$ETS_Fusion_Groups)
+input_SCT %>% 
+  filter(ETS_Fusion != "OtherAML") %>% 
+  group_by(ETS_Fusion) %>% 
+  dplyr::count() %>% 
+  arrange(desc(n))
+```
+
+```{r}
+input_SCT %>% 
+  filter(Cyto.Fusion.Molecular.Risk_update=="Low") %>% 
+  group_by(Primary.Fusion) %>% 
+  dplyr::count()
+```
+
+```{r}
+#These 
+input_SCT %>% 
+  filter(Cyto.Fusion.Molecular.Risk_update=="Low") %>% 
+  select(Sample, Protocol, Primary.Fusion, FLT3.ITD.positive., FLT3.ITD.allelic.ratio,NPM.mutation., CEBPA.mutation.,Primary.CNV, MRD.at.end.of.course.1, MRD.at.end.of.course.2, SCT.in.1st.CR) %>% 
+  View()
+```
+
+```{r fig.height=7, fig.width=15}
+# pdf("Figures/TARGET_AML_ETS_Family_Fusions_OneGroup_KM_by_CytoMolRiskGroup_NoSCT.left_YesSCT.right_plot.pdf", height = 7, width = 15)
+# grid.arrange(grobs=c(KM.ETS.RG.SCT$OS,KM.ETS.RG.SCT$EFS), ncol=2)
+grid.arrange(grobs=c(KM.ETS.RG$EFS,KM.ETS.RG.SCT$EFS), ncol=2)
+# dev.off()
+```
+
+## SCT in ETS Fusions
+
+```{r}
+cc_SCT <- c("ETS Fusion with SCT"="firebrick1", "ETS Fusion without SCT"="firebrick4")
+
+
+input_ETS_SCT <- in_df %>% 
+  filter(grepl("Yes|No", SCT.in.1st.CR), 
+         ETS_vs_OtherAML=="ETS Fusion") %>% 
+  mutate(ETS_by_SCT=case_when(
+    SCT.in.1st.CR=="Yes" ~ "ETS Fusion with SCT",
+    TRUE ~ "ETS Fusion without SCT",
+  ))
+
+table(input_ETS_SCT$ETS_by_SCT)
+
+KM.ETS_only.RG.SCT <- KM.plots(df=input_ETS_SCT,
+                   group_vars = NULL,
+                   type = "OS",
+                   covariate = "ETS_by_SCT",
+                   cohort = "1031",
+                   cc = cc_SCT)
+```
+
+```{r fig.height=7, fig.width=15}
+# pdf("Figures/KM_plots/TARGET_AML_ETS_Family_Fusions_vs_SCT_EFS_KM_plot.pdf", height = 7, width = 7)
+grid.arrange(grobs=c(KM.ETS_only.RG.SCT$EFS), ncol=1)
+# dev.off()
+```
+
+
+## SCT in ETV6-MNX1
+
+```{r}
+ETS.only %>% 
+  group_by(ETS_Fusion_Groups, Risk.group.classification..by.protocol.1031) %>% 
+  count()
+```
+
+```{r}
+etv6.outcome <- in_df %>% 
+  filter(ETS_Fusion_Groups=="ETV6-MNX1")
+
+# table(etv6.outcome$SCT.in.1st.CR)
+
+KM.ETV6.MNX1 <- KM.plots(df=etv6.outcome,
+                   group_vars = NULL,
+                   type = "OS",
+                   covariate = "SCT.in.1st.CR",
+                   cohort = "1031",
+                   cc = c("Yes"="blue", "No"="red"))
+```
+
+```{r fig.height=7, fig.width=10}
+# pdf("Outcome_and_Characteristics/TARGET_AML_ETV6.MNX1_by_SCT.pdf", height = 6, width = 9)
+grid.arrange(grobs=c(KM.ETV6.MNX1$OS, KM.ETV6.MNX1$EFS), ncol=2)
+# dev.off()
+```
+
+
+
+# Compare Groups for ETS Fusions 
+
+```{r message=FALSE}
+library(compareGroups)
+```
+
+```{r}
+cols <-read.csv(file.path(TARGET,
+                          "Clinical/metadata/TARGET_AML_Clinical_Columns_for_Analysis_7.24.20.csv"))$x
+cols <- gsub("Cyto.Fusion.Molecular.Risk","Cyto.Fusion.Molecular.Risk_update", cols) 
+
+table(cols %in% colnames(samples))
+cols <- cols[cols %in% colnames(samples)]
+
+table(samples$ETS_Fusion_Groups)
+```
+
+```{r}
+dat <- samples %>% 
+  filter(!grepl("NBM|CD34", Group)) %>% 
+  dplyr::select(Reg.,USI,ETS_Fusion_Groups, one_of(cols)) %>% #Reg.,USI,
+  mutate_at(vars(ETS_Fusion_Groups), 
+            ~factor(., levels=c("OtherAML","ETS-Other", 
+                                "ETV6-MNX1", "ETV6-Other", 
+                                "FUS-ERG", "HNRNPH1-ERG"))) %>%
+  
+  # mutate_at(vars(Age.Category),
+  #           ~case_when(
+  #             .== "Greater than 18 years" ~ "Greater than 10 years",
+  #             .=="Between 10 and 18 years"~ "Greater than 10 years",
+  #             TRUE ~ .)) %>%
+  # 
+  mutate_if(is.character, ~case_when(
+    .=="Unknown" ~ NA_character_, 
+    .=="unknown" ~ NA_character_, 
+    .=="Not reported" ~ NA_character_,
+    .=="<0.1" ~ NA_character_,
+    grepl("^\\.$", .) ~ NA_character_,
+    TRUE ~.))  
+
+
+# View(dat)
+# dim(dat) #1493   50
+table(dat$ETS_Fusion_Groups)
+head(dat)
+```
+
+Need to look at all ETS Fusions - they 
+
+```{r}
+comparisons <- paste("OtherAML", unique(ETS.only$ETS_Fusion_Groups)) %>% 
+  sapply(., str_split, pattern=" ") 
+
+names(comparisons) <- unique(ETS.only$ETS_Fusion_Groups)
+# comparisons
+```
+
+```{r message=FALSE, warning=FALSE}
+tables <- lapply(comparisons, function(x){
+  df <- dat %>% 
+    filter(ETS_Fusion_Groups %in% x) %>% 
+    droplevels(.)
+  
+  all.comp <- compareGroups(
+                        formula = ETS_Fusion_Groups ~ .,
+                        data = df,
+                        method = 4,
+                        max.ylev = 7,
+                        max.xlev = 10,
+                        Q1 = 0,
+                        Q3 = 1,
+                        ref = 1,
+                        p.corrected = TRUE,
+                        include.miss = FALSE)
+
+  table.chars <- createTable(all.comp,
+                             show.p.overall=TRUE,
+                             show.all = TRUE,
+                             show.p.mul = TRUE,
+                             show.n=TRUE)
+  
+  filename <- paste0("Outcome_and_Characteristics/TARGET_AML_ETS_Family_",x[2], "_Characteristics_", format(Sys.Date(),"%m.%d.%Y"),".xlsx")
+  # print(filename)
+  export2xls(table.chars,file = filename)
+})
+
+```
+
+
+
+# UMAP
+
+```{r}
+table(samples$ETS_Fusion_Groups)
+```
+
+##  Primary Fusions  
+
+```{r}
+bulk <- !grepl("CD34_PB", samples$Group) & 
+  !grepl("AML, NOS", samples$AML_Subtype) & 
+  !grepl("No.Primary.Fusion", samples$AML_Subtype) 
+
+samps_bulk <- samples[bulk,] 
+samps_bulk$ETS_Fusion_Groups <- ifelse(grepl("KMT2A|CBFB|RUNX1|CBFA2T3-GLIS2|NBM", samps_bulk$AML_Subtype),samps_bulk$AML_Subtype, samps_bulk$ETS_Fusion_Groups)
+
+# table(samps_bulk$AML_Subtype,samps_bulk$ETS_Fusion_Groups) 
+table(samps_bulk$ETS_Fusion_Groups)
+```
+
+```{r}
+Cols <- c("ETS_Fusion_Groups",
+          "Batch","Tissue")
+
+# all(Cols %in% colnames(samps_bulk)) #TRUE
+
+
+colors37 = c("#466791","#60bf37","#953ada","#4fbe6c","#ce49d3","#a7b43d","#5a51dc","#d49f36","#552095","#507f2d","#db37aa","#84b67c","#a06fda","#df462a","#5b83db","#c76c2d","#4f49a3","#82702d","#dd6bbb","#334c22","#d83979","#55baad","#dc4555","#62aad3","#8c3025","#417d61","#862977","#bba672","#403367","#da8a6d","#a79cd4","#71482c","#c689d0","#6b2940","#d593a7","#895c8b","#bd5975")
+
+cc_umap <- list(ETS_Fusion_Groups=c(
+        "NBM"="black",
+        
+        "ETS-Other"="darkturquoise",
+        "ETV6-MNX1"="darkorchid1",
+        "ETV6-Other"="darkorchid4",
+        "HNRNPH1-ERG"="firebrick2",
+        "FUS-ERG"="dodgerblue2",
+        
+        "CBFA2T3-GLIS2"="tomato4",
+        "CBFB-MYH11"="cadetblue4",
+        "KMT2A"="khaki2",
+        "RUNX1-RUNX1T1"="burlywood3",
+        
+        "OtherAML"="grey80"))
+
+par(mar=c(10,5,5,5))
+barplot(rep(1,length(cc_umap$ETS_Fusion_Groups)),col = cc_umap$ETS_Fusion_Groups, names.arg = names(cc_umap$ETS_Fusion_Groups), las=2)
+```
+
+```{r}
+suppressPackageStartupMessages(library(DelayedArray))
+
+genes <- geneIDs %>% 
+  filter(grepl("^ENSG", gene_id))
+
+
+cts_subset <- in_cts[genes$gene_name,c(samps_bulk$Sample)]
+cpm_subset <- CPM[rownames(CPM) %in% genes$gene_name,samps_bulk$Sample]
+
+# Mean vs Dispersion Feature Selection 
+obj <- seqGlue::calc_dispersion(as.matrix(cpm_subset), removeOutliers = TRUE) #removes outlier genes/transcripts based on cooks distance
+gc()
+
+sg_all <- seqGlue::get_selected_genes(seqGlue::select_genes(obj, top_n=NULL))
+length(sg_all) #4014
+
+
+##### PCA (doesnt add enough clarity to makeu p for the runtime)
+# norm_cts_log <- log2(sf.scaled+1)
+# norm_cts_scaled <- t(scale(t(norm_cts_log), center = TRUE, scale = TRUE))
+# # pca_bulk <- run_jackstraw(TFIDF_Matrix = norm_cts_scaled[sg_all,])
+# # pca_bulk <- readRDS("Jackstraw_pca_bulk_samples_2021-05-05.RDS")
+# 
+# # length(pca_bulk$input_features)
+# # pca_bulk$N_comp #72
+# # saveRDS(pca_bulk, "Jackstraw_pca_bulk_samples_2021-05-05.RDS")
+```
+
+
+n_neighbors	
+The size of local neighborhood (in terms of number of neighboring sample points) used for manifold approximation. Larger values result in more global views of the manifold, while smaller values result in more local data being preserved.
+
+min_dist	
+The effective minimum distance between embedded points. Smaller values will result in a more clustered/clumped embedding where nearby points on the manifold are drawn closer together, while larger values will result on a more even dispersal of points. 
+
+
+
+```{r}
+dds <- DESeq2::DESeqDataSetFromMatrix(round(cts_subset, digits = 0),
+                                      colData = samps_bulk,
+                                      design = ~ 1)
+
+
+vst <- DESeq2::vst(dds, blind = TRUE)
+dim(vst)
+
+
+in_vst <- SummarizedExperiment::assay(vst)[sg_all,]
+
+dim(in_vst)
+head(in_vst[,1:5])
+```
+
+```{r}
+umap_bulk <- UMAP_workflow(TFIDF_Matrix = in_vst, 
+                           scale_data=FALSE,
+                           input_features = sg_all,
+                            samples_vector = samps_bulk$Sample,
+                            sample_info_df = samps_bulk,
+                            Columns_for_Plots = Cols,
+                            cc = cc_umap, 
+                            min_dist = 0.01,
+                            n_neighbors=30,
+                            k2=10,
+                            res2=0.025)
+
+# saveRDS(umap_bulk,"TARGET_AML_ETS_Family_Fusions_sg4014_nn30_md0.01_UMAP_07.07.21.RDS")
+```
+
+```{r}
+umap_bulk <- readRDS("UMAP/TARGET_AML_ETS_Family_Fusions_sg4014_nn30_md0.01_UMAP_07.07.21.RDS")
+umap_bulk$umap_res <- umap_bulk$umap_res %>% 
+  mutate_if(is.character,~gsub("ERG-HNRNPH1","HNRNPH1-ERG", .))
+
+
+# table(umap_bulk$umap_res$cluster_k10,
+#       umap_bulk$umap_res$ETS_Fusion_Groups)
+```
+
+```{r}
+umap_bulk.clusterGroups <- umap_bulk$umap_res %>% 
+  select(Sample, ETS_Fusion_Groups, cluster_k10) %>% 
+    mutate_at(vars(ETS_Fusion_Groups), ~ifelse(grepl(ETS.re, .), "ETS Fusion", .)) %>% 
+    group_by(cluster_k10) %>% 
+    mutate(N_in_cluster=n())%>%
+    
+    group_by(ETS_Fusion_Groups,add = TRUE) %>% 
+    mutate(Number_Subtype_in_cluster=n()) %>%
+    ungroup() %>% 
+    
+    group_by(cluster_k10) %>%
+    mutate(Major_Subtype_in_cluster=case_when(
+      Number_Subtype_in_cluster == max(Number_Subtype_in_cluster) ~ ETS_Fusion_Groups,
+      TRUE ~ NA_character_)) %>% 
+    ungroup() %>% 
+  select(cluster_k10, Major_Subtype_in_cluster) %>% 
+  distinct() %>% 
+  filter(!is.na(Major_Subtype_in_cluster)) %>% 
+  arrange(cluster_k10)
+    
+
+
+umap_bulk.clusterGroups 
+# umap_bulk$cluster_plots1
+```
+
+```{r}
+umap_bulk$umap_res <- umap_bulk$umap_res %>% 
+  left_join(., umap_bulk.clusterGroups, by="cluster_k10")
+```
+
+```{r}
+ETS.clusters <- umap_bulk$umap_res %>% 
+  filter(grepl(ETS.re, ETS_Fusion_Groups)) %>% 
+  select(Reg.:ETS_Fusion_Groups,Primary.Fusion,Additional.Fusions.CNV, cluster_k10, Major_Subtype_in_cluster,
+         Cyto_vs_Seq_Fusions, ISCN) %>% 
+  arrange(cluster_k10)
+
+# ETS.clusters
+# write.csv(ETS.clusters, "UMAP/TARGET_AML_ETS_Fusion_InGroup_vs_Outliers_byLeidenClusters.csv", row.names = FALSE)
+```
+
+## 2D Scatter plots
+
+```{r fig.height=5, fig.width=5}
+# pdf("Figures/TARGET_AML_ETS_Family_Fusions_UMAP_2D_scatter.pdf", height = 10, width = 10)
+umap_bulk$umap_2D_scatter[[1]] 
+# dev.off()
+```
+
+```{r fig.height=10, fig.width=15}
+ellipse_2d <- ggplot(umap_bulk$umap_res,aes(x=x, y=y)) +
+  geom_point(filter(umap_bulk$umap_res, !grepl("ETV6|ETS|ERG",ETS_Fusion_Groups)),
+             mapping=aes(x=x, y=y, fill=ETS_Fusion_Groups),
+             shape=21,size=5.5, alpha=0.5, color="white") +
+  stat_ellipse(data=filter(umap_bulk$umap_res, cluster_k10=="9"),
+               mapping=aes(group=cluster_k10, color=cluster_k10),
+               level = 0.975,
+               show.legend = FALSE, size=1.25) +
+  geom_point(data=filter(umap_bulk$umap_res, grepl("ETV6|ETS|ERG",ETS_Fusion_Groups)), 
+             mapping=aes(x=x, y=y, fill=ETS_Fusion_Groups),
+             shape=21, size=5.5, color="transparent", alpha=0.75) +
+
+  scale_fill_manual(values=cc_umap$ETS_Fusion_Groups) +
+  scale_color_manual(values=c("royalblue3")) +
+  guides(color=FALSE, fill=guide_legend("Fusion Groups")) +
+  labs(x="UMAP 1", y="UMAP 2") +
+  theme_classic() +
+  theme(axis.text = element_text(size=24, color="black"),
+        legend.position = "none",
+        axis.title = element_text(size=26),
+        legend.text = element_text(size=24),
+        legend.title = element_text(size=18))
+
+ellipse_2d
+# ggsave(plot=ellipse_2d, filename="Figures/TARGET_AML_ETS_Family_Fusions_UMAP_2D_ellipse_scatter_noLegend.pdf", device = "pdf", height = 10, width = 12)
+```
+
+
+## 3D scatter plots
+
+```{r}
+
+levels=c( "ETV6-MNX1","ETV6-Other","FUS-ERG","HNRNPH1-ERG", "ETS-Other",
+                                         "CBFA2T3-GLIS2", "CBFB-MYH11",
+                                         "RUNX1-RUNX1T1","KMT2A",
+                                         "OtherAML","NBM")
+
+levels <- rev(levels)
+
+umap_bulk$umap_res <- umap_bulk$umap_res %>% 
+  mutate_at(vars(ETS_Fusion_Groups), ~factor(., levels=levels))
+
+# table(t$ETS_Fusion_Groups)
+
+cc_umap[["cluster_k10"]] <- RColorBrewer::brewer.pal(10,"Paired")
+```
+
+
+```{r}
+info_cols <- c("Sample",Cols, c("Primary.Fusion","Mutations.Category","EFS.event.type.ID"))
+plotly <- scatter_plots_3d(umap_workflow_res = umap_bulk, 
+                 Group_Column = "ETS_Fusion_Groups", 
+                 blackbg = FALSE,
+                 Cols=info_cols, ptsize = 6,
+                 cc=cc_umap$ETS_Fusion_Groups)
+
+plotly
+
+# htmlwidgets::saveWidget(plotly, file="TARGET_AML_ETS_Family_Fusions_UMAP.html", selfcontained = TRUE)
+# orca(plotly, "TARGET_AML_ETS_Family_Fusions_UMAP_plotly.svg")
+```
+
+```{r}
+make_alpha <- function(color, percent=100){
+  # https://www.dataanalytics.org.uk/make-transparent-colors-in-r/
+  ## Get RGB values for named color
+  rgb.val <- col2rgb(color)
+  
+  ## Make new color using input color as base and alpha set by transparency
+  t.col <- rgb(rgb.val[1], rgb.val[2], rgb.val[3],
+               max = 255,
+               alpha = (100 - percent) * 255 / 100)
+
+}
+```
+
+
+```{r fig.height=7, fig.width=7}
+colors_3d_other <- umap_bulk$umap_res %>% 
+  filter(!grepl(ETS.re, ETS_Fusion_Groups)) %>% 
+  left_join(., data.frame(color=cc_umap$ETS_Fusion_Groups) %>% 
+              rownames_to_column("ETS_Fusion_Groups"),
+            by="ETS_Fusion_Groups") %>% 
+  mutate_at(vars(color), ~sapply(., make_alpha, percent=70)) %>% 
+  arrange(ETS_Fusion_Groups)
+
+n1 <- length(as.numeric(as.factor(colors_3d_other$ETS_Fusion_Groups)))
+
+
+colors_3d_ets <- umap_bulk$umap_res %>% 
+  filter(grepl(ETS.re, ETS_Fusion_Groups)) %>% 
+  left_join(., data.frame(color=cc_umap$ETS_Fusion_Groups) %>% 
+              rownames_to_column("ETS_Fusion_Groups"),
+            by="ETS_Fusion_Groups") %>% 
+   mutate_at(vars(color), ~sapply(., make_alpha, percent=40)) %>% 
+  arrange(ETS_Fusion_Groups)
+
+n2 <- length(as.numeric(as.factor(colors_3d_ets$ETS_Fusion_Groups)))
+
+t <- 200
+p <- 60
+# t <- 260
+# p <- 45
+
+# t <- 200
+# p <- 25
+
+# pdf("Figures/TARGET_AML_ETS_Family_Fusions_plot3D_scatter_3D_long.pdf", height = 10, width = 12)
+plot3D::scatter3D(x=colors_3d_other$x, y=colors_3d_other$y, z=colors_3d_other$z,
+                   bty = "b2",
+                  colvar=as.numeric(as.factor(colors_3d_other$ETS_Fusion_Groups)),
+                  col=unique(colors_3d_other$color),
+                  pch=19, colkey=FALSE,
+                  theta=t,phi=p, cex=1.2,
+                  scale = FALSE)
+
+plot3D::scatter3D(x=colors_3d_ets$x, y=colors_3d_ets$y, z=colors_3d_ets$z,
+                   bty = "b2",
+                  colvar=as.numeric(as.factor(colors_3d_ets$ETS_Fusion_Groups)),
+                  col=unique(colors_3d_ets$color),
+                  pch=19, colkey=FALSE,
+                  theta=t,phi=p, cex=1.0,  
+                  scale = FALSE,
+                  add = TRUE)
+# dev.off()
+```
+
+## All Diagnostic Samples 
+
+```{r}
+bulk_all <- !grepl("CD34_PB", samples$Group) 
+
+samps_bulk_2 <- samples[bulk_all,] 
+samps_bulk_2$AML_Subtype <- case_when(
+  grepl("KMT2A|CBFB|RUNX1|CBFA2T3-GLIS2|NSD1|NBM", samps_bulk_2$AML_Subtype) ~ samps_bulk_2$AML_Subtype,
+  grepl("Yes", samps_bulk_2$CEBPA.mutation.) ~ "CEBPA",
+  # grepl("ETS-Fusion", samps_bulk$AML_Subtype) ~ samps_bulk$ETS_Fusion_Groups,
+  TRUE ~ gsub("AML", "OtherAML", samps_bulk_2$Group))
+
+
+
+samps_bulk_2 <- samps_bulk_2[!grepl("OtherAML",samps_bulk_2$AML_Subtype), ]
+table(samps_bulk_2$AML_Subtype)
+```
+
+```{r}
+Cols_all <- c("AML_Subtype",
+          "Batch","Tissue")
+
+
+colors37 = c("#466791","#60bf37","#953ada","#4fbe6c","#ce49d3","#a7b43d","#5a51dc","#d49f36","#552095","#507f2d","#db37aa","#84b67c","#a06fda","#df462a","#5b83db","#c76c2d","#4f49a3","#82702d","#dd6bbb","#334c22","#d83979","#55baad","#dc4555","#62aad3","#8c3025","#417d61","#862977","#bba672","#403367","#da8a6d","#a79cd4","#71482c","#c689d0","#6b2940","#d593a7","#895c8b","#bd5975")
+
+cc_umap_all <- list(AML_Subtype=c(
+        "NBM"="white",
+        
+        "CEBPA"="darkturquoise",
+        "NUP98-NSD1"="dodgerblue2",
+        
+        "CBFA2T3-GLIS2"="tomato4",
+        "CBFB-MYH11"="cadetblue4",
+        "KMT2A"="khaki2",
+        "RUNX1-RUNX1T1"="burlywood3",
+        
+        "OtherAML"="grey80"))
+
+# par(mar=c(10,5,5,5))
+# barplot(rep(1,length(cc_umap$ETS_Fusion_Groups)),col = cc_umap$ETS_Fusion_Groups, names.arg = names(cc_umap$ETS_Fusion_Groups), las=2)
+```
+
+```{r}
+suppressPackageStartupMessages(library(DelayedArray))
+
+genes <- geneIDs %>% 
+  filter(grepl("^ENSG", gene_id))
+
+
+cts_subset_all <- in_cts[genes$gene_name,c(samps_bulk_2$Sample)]
+cpm_subset_all <- CPM[rownames(CPM) %in% genes$gene_name,samps_bulk_2$Sample]
+
+# Mean vs Dispersion Feature Selection 
+obj2 <- seqGlue::calc_dispersion(as.matrix(cpm_subset_all), removeOutliers = TRUE) #removes outlier genes/transcripts based on cooks distance
+gc()
+
+sg_all_pts <- seqGlue::get_selected_genes(seqGlue::select_genes(obj2, top_n=NULL))
+length(sg_all_pts) # 3810
+
+
+##### PCA (doesnt add enough clarity to makeu p for the runtime)
+# norm_cts_log <- log2(sf.scaled+1)
+# norm_cts_scaled <- t(scale(t(norm_cts_log), center = TRUE, scale = TRUE))
+# # pca_bulk <- run_jackstraw(TFIDF_Matrix = norm_cts_scaled[sg_all,])
+# # pca_bulk <- readRDS("Jackstraw_pca_bulk_samples_2021-05-05.RDS")
+# 
+# # length(pca_bulk$input_features)
+# # pca_bulk$N_comp #72
+# # saveRDS(pca_bulk, "Jackstraw_pca_bulk_samples_2021-05-05.RDS")
+```
+
+
+n_neighbors	
+The size of local neighborhood (in terms of number of neighboring sample points) used for manifold approximation. Larger values result in more global views of the manifold, while smaller values result in more local data being preserved.
+
+min_dist	
+The effective minimum distance between embedded points. Smaller values will result in a more clustered/clumped embedding where nearby points on the manifold are drawn closer together, while larger values will result on a more even dispersal of points. 
+
+```{r}
+dds_all <- DESeq2::DESeqDataSetFromMatrix(round(cts_subset_all, digits = 0),
+                                      colData = samps_bulk_2,
+                                      design = ~ 1)
+
+
+vst_all <- DESeq2::vst(dds_all, blind = TRUE)
+dim(vst_all)
+
+
+in_vst_all <- SummarizedExperiment::assay(vst_all)[sg_all_pts,]
+
+dim(in_vst_all) #3810 1551
+head(in_vst_all[,1:5])
+```
+
+```{r}
+umap_bulk_all <- UMAP_workflow(TFIDF_Matrix = in_vst_all, 
+                           scale_data=FALSE,
+                           input_features = sg_all_pts,
+                            samples_vector = samps_bulk_2$Sample,
+                            sample_info_df = samps_bulk_2,
+                            Columns_for_Plots = Cols_all,
+                            cc = cc_umap_all, 
+                            min_dist = 0.05,
+                            n_neighbors=30,
+                            k2=10,
+                            res2=0.025)
+
+# saveRDS(umap_bulk_all,"TARGET_AML_primary.fusions_Patients_and_NBM_UMAP_07.19.21.RDS")
+```
+
+```{r}
+umap_bulk_all <- readRDS("UMAP/TARGET_AML_All_Patients_and_NBM_UMAP_07.19.21.RDS")
+# table(umap_bulk_all$umap_res$cluster_k10,
+#       umap_bulk_all$umap_res$ETS_Fusion_Groups)
+```
+
+```{r fig.height=10, fig.width=10}
+# pdf("UMAP/TARGET_AML_All_diagnostic_Patients_and_NBM_UMAP.pdf", height = 10, width = 10)
+umap_bulk_all$umap_2D_scatter[[1]] 
+# dev.off()
+```
+
+```{r}
+info_cols_2 <- c("Sample",Cols_all, c("Primary.Fusion","Mutations.Category","EFS.event.type.ID"))
+plotly <- scatter_plots_3d(umap_workflow_res = umap_bulk_all, 
+                 Group_Column = "AML_Subtype", 
+                 Cols=info_cols_2, 
+                 cc=cc_umap_all$AML_Subtype)
+
+
+# plotly
+# htmlwidgets::saveWidget(plotly,selfcontained = TRUE,background = "black",file = "TARGET_AML_diagnostic_Patients_and_NBM_UMAP.html")
+```
+
+# Differential Expression Analysis
+
+```{r}
+comparisons <- paste("OtherAML", unique(ETS.only$ETS_Fusion_Groups)) %>% 
+  sapply(., str_split, pattern=" ") 
+
+names(comparisons) <- unique(ETS.only$ETS_Fusion_Groups)
+```
+
+```{r}
+comparisons_NBM <- paste("NBM", unique(ETS.only$ETS_Fusion_Groups)) %>% 
+  sapply(., str_split, pattern=" ") 
+
+names(comparisons_NBM) <- unique(ETS.only$ETS_Fusion_Groups)
+```
+
+
+
+## vs AML 
+
+```{r eval=FALSE}
+#All the goddamn heatmaps are broken..
+DEGs_vs_AML <- lapply(comparisons, function(x){
+  
+  input <- samples %>% 
+    filter(ETS_Fusion_Groups %in% x) %>% 
+    set_rownames(.$Sample)
+  
+  print(table(input$ETS_Fusion_Groups))
+  
+  twoGroups_DEGs(expnData = in_cts,
+                 clinData = input,
+                 ref = "OtherAML",
+                 col = "ETS_Fusion_Groups",
+                 percent.cutoff = 0.05,
+                 Custom.Cols = c("ETS_Fusion_Groups","SNVs"),
+                 anno = FALSE)
+  
+  
+})
+
+names(DEGs_vs_AML) <- sapply(comparisons, function(x) x[2])
+# saveRDS(DEGs_vs_AML, "TARGET_AML_ETS_Family_Fusions_vs_OtherAML_List_07.10.21.RDS")
+```
+
+```{r}
+DEGs_vs_AML <- readRDS("DEGs/TARGET_AML_ETS_Family_Fusions_vs_OtherAML_List_07.10.21.RDS")
+names(DEGs_vs_AML)
+# length(DEGs_vs_AML)
+```
+
+```{r}
+DEGs.df <- lapply(names(DEGs_vs_AML), function(x){
+  
+  res <- DEGs_vs_AML[[x]]
+  # n_fusion <- length(res$phenovector[res$phenovector=="GroupA"])
+  # n_ref <- length(res$phenovector[res$phenovector=="GroupB"])
+  
+  # filename <- paste0("DEGs/TARGET_AML_ETS_Family_", x, "_vs_OtherAML_DEGs_07.12.21.csv")
+  # con <- file(filename, open="wt")
+  # writeLines(paste("# Differentially expressed genes in diagnostic", x, "AML compared to other heterogenous (non-ETS fusion) AML"), con)
+  # writeLines(paste("# Input Samples:", x, "diagnostic bulk samples (N=", n_fusion,") vs  other AML (N=", n_ref,")"), con)
+  # 
+  df <- extract_DEGs(res) %>% 
+    left_join(., geneIDmap, by=c("gene"="gene_name"))
+
+  # 
+  # write.csv(df, con,row.names = F)
+  # close(con)
+  
+  return(df)
+})
+
+names(DEGs.df) <- names(DEGs_vs_AML)
+
+# lapply(DEGs.df, head)
+sapply(DEGs.df, dim)
+```
+
+```{r}
+ETV6.MNX1.literature.degs <- c("EDIL3", "CNTNAP5", "ANGPT1", "DSG2", "ITGA9", "ITGAV", "KDR",  "SIGLEC6")
+
+# lapply(names(DEGs.df), function(x) {
+#   filter(DEGs.df[[x]], gene %in% ETV6.MNX1.literature.degs) %>% 
+#     mutate(Comparison=x)
+# }) %>% 
+#   bind_rows() %>% 
+#   select(gene, Comparison, everything()) 
+```
+
+
+```{r}
+all_degs <- lapply(DEGs.df, function(x) pull(x, gene))
+common_all <- multi_intersect(l = all_degs)
+
+common_all
+length(common_all) #17
+# write.csv(common_all, "DEGs/TARGET_AML_ETS_Family_Fusions_common_DEGs.csv", row.names = FALSE)
+```
+
+```{r}
+common_ETV6 <- intersect(all_degs[["ETV6-MNX1"]], all_degs[["ETV6-Other"]])
+
+length(common_ETV6)
+
+
+common_ERG<- intersect(all_degs$`FUS-ERG`, all_degs$`ERG-HNRNPH1`)
+
+length(common_ERG)
+```
+
+```{r}
+# lapply(DEGs.df, function(x) filter(x, grepl("^SMARC|^NSD", gene)))
+```
+
+
+### Heatmaps
+
+Need to be fixed...
+
+```{r}
+library(ComplexHeatmap)
+ComplexHeatmap::draw(DEGs_vs_AML$`ETS-Other`$Heatmap)
+#data length exceeds size of matrix
+#Error in labels_mat[, i] : subscript out of bounds
+
+
+# DEGs_vs_AML$`ETS-Other`$PCA$pca_plot
+# DEGs_vs_AML$`ETS-Other`$MDS$plot
+# plot(DEGs_vs_AML$`ETS-Other`$dendrogram$samp.c1)
+# ComplexHmap(mat=)
+```
+
+```{r fig.height=10, fig.width=10}
+extract_MDS(DEGs_vs_AML$`FUS-ERG`)
+extract_PCA(DEGs_vs_AML$`FUS-ERG`)
+```
+
+
+
+
+## vs NBM
+
+
+```{r eval=FALSE}
+DEGs_vs_NBM <- lapply(comparisons_NBM, function(x){
+  
+  input <- samples %>% 
+    filter(ETS_Fusion_Groups %in% x) %>% 
+    set_rownames(.$Sample)
+  
+  print(table(input$ETS_Fusion_Groups))
+  
+  twoGroups_DEGs(expnData = in_cts,
+                 clinData = input,
+                 ref = "NBM",
+                 col = "ETS_Fusion_Groups",
+                 percent.cutoff = 0.05,
+                 Custom.Cols = c("ETS_Fusion_Groups","SNVs"),
+                 anno = FALSE)
+  
+  
+})
+
+names(DEGs_vs_NBM) <- sapply(comparisons_NBM, function(x) x[2])
+# saveRDS(DEGs_vs_NBM, "TARGET_AML_ETS_Family_Fusions_vs_NBM_List_07.12.21.RDS")
+```
+
+```{r}
+DEGs_vs_NBM <- readRDS("DEGs/TARGET_AML_ETS_Family_Fusions_vs_NBM_List_07.12.21.RDS")
+
+names(DEGs_vs_NBM)
+```
+
+```{r}
+DEGs.vsNBM.df <- lapply(names(DEGs_vs_NBM), function(x){
+
+  res <- DEGs_vs_NBM[[x]]
+  # n_fusion <- length(res$phenovector[res$phenovector=="GroupA"])
+  # n_ref <- length(res$phenovector[res$phenovector=="GroupB"])
+  # 
+  # filename <- paste0("DEGs/TARGET_AML_ETS_Family_", x, "_vs_NBM_DEGs_07.12.21.csv")
+
+  # con <- file(filename, open="wt")
+  # writeLines(paste("# Differentially expressed genes in diagnostic", x, "AML compared to normal healthy bone marrow"), con)
+  # writeLines(paste("# Input Samples:", x, "diagnostic bulk samples (N=", n_fusion,") vs  NBM (N=", n_ref,")"), con)
+
+  df <- extract_DEGs(res) %>%
+    left_join(., geneIDmap, by=c("gene"="gene_name"))
+
+
+  # write.csv(df, con,row.names = F)
+  # close(con)
+
+  return(df)
+})
+
+names(DEGs.vsNBM.df) <- names(DEGs_vs_NBM)
+
+# lapply(DEGs.vsNBM.df, head)
+sapply(DEGs.vsNBM.df, dim)
+```
+
+```{r}
+all_degs_nbm <- lapply(DEGs.vsNBM.df, function(x) pull(x, gene))
+common_all_nbm <- multi_intersect(l = all_degs_nbm)
+
+
+length(common_all_nbm) #1239
+```
+
+```{r}
+ETV6.MNX1.literature.degs <- c("EDIL3", "CNTNAP5", "ANGPT1", "DSG2", "ITGA9", "ITGAV", "KDR",  "SIGLEC6")
+
+# lapply(names(DEGs.vsNBM.df), function(x) {
+#   filter(DEGs.vsNBM.df[[x]], gene %in% ETV6.MNX1.literature.degs) %>% 
+#     mutate(Comparison=x)
+# }) %>% 
+#   bind_rows() %>% 
+#   select(gene, Comparison, everything()) 
+```
+
+
+```{r}
+NBM_and_AML_DE <- intersect(common_all, common_all_nbm)
+
+length(NBM_and_AML_DE)
+NBM_and_AML_DE
+```
+
+```{r}
+#Welp, that sucks. without NSD2 or SMARCA2 expression, its unlikely the BET inhibitors will work. Yes, it was kinda a long shot, but its very unlikely now that we know the expression isnt elevated. 
+#Howver, both genes are expressed in ETS fusions, so at least they are not silenced... 
+
+# https://pubmed.ncbi.nlm.nih.gov/33602783/
+# lapply(DEGs.vsNBM.df, function(x) filter(x, grepl("^SMARC|^NSD", gene)))
+# lapply(DEGs.df, function(x) filter(x, grepl("^SMARC|^NSD", gene)))
+
+beti.genes <- logCPM[grepl("SMARCA2|NSD2", rownames(logCPM)),ETS.only$Sample] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("gene") %>% 
+  gather(Sample, log2CPM, -gene) %>% 
+  left_join(.,  ETS.only, by="Sample")
+
+
+# ggplot(beti.genes, aes(x=gene, y=log2CPM, fill=ETS_Fusion_Groups)) +
+#   geom_boxplot()
+```
+
+
+### Check direction of common DEGs
+
+```{r}
+#All the common genes are up-regulated 
+common_degs_resNBM <- lapply(names(DEGs.vsNBM.df), function(x) {
+  filter(DEGs.vsNBM.df[[x]], gene %in% NBM_and_AML_DE) %>% 
+    mutate(Comparison=x)
+}) %>% 
+  bind_rows() %>% 
+  select(gene, Comparison, everything()) %>% 
+  arrange(gene)
+
+# options(scipen=999)
+# quantile(common_degs_resNBM$adj.P.Val) #max is p=0.004
+quantile(common_degs_resNBM$logFC) #min is 2 fold-greater
+```
+
+```{r}
+#All the common genes are up-regulated 
+common_degs_res <- lapply(names(DEGs.df), function(x) {
+  filter(DEGs.df[[x]], gene %in% NBM_and_AML_DE) %>% 
+    mutate(Comparison=x)
+}) %>% 
+  bind_rows() %>% 
+  select(gene, Comparison, everything()) %>% 
+  arrange(gene)
+
+options(scipen=999)
+
+
+
+# quantile(common_degs_res$adj.P.Val) #max is p=0.02
+quantile(common_degs_res$logFC) #min is 2.3 fold-greater
+```
+
+
+### Any ADC? 
+
+```{r}
+lapply(DEGs.vsNBM.df, function(x) filter(x, !is.na(Treatment.type), logFC > 0) %>% 
+         mutate(DE_Common_ETSFusions=gene %in% common_all_nbm) %>% 
+         select(gene, DE_Common_ETSFusions, Treatment.type, Cell_Surface_Protein, everything()))
+```
+
+
+# ADC/CART and Drug Targets 
+
+```{r}
+library(UpSetR)
+```
+
+```{r}
+#Not updated since April 2020 - so I have these already included in the geneIDmap file
+ADC.annots <- read.csv("References/ADC_and_CARTcell_Targets_Database_ADCReview_clinicaltrialsGov.csv") %>% 
+  select(matches("Gene.symbol"), everything()) %>% 
+  filter(!c(is.na(Gene.symbol.of.target..Original.) & is.na(Gene.symbol.of.target..Final.))) #no drug target available to annotate
+
+head(ADC.annots)
+dim(ADC.annots) #901  18
+table(ADC.annots$Treatment.type)
+# table(is.na(ADC.annots$Gene.symbol.of.target..Original.))
+# table(is.na(ADC.annots$Gene.symbol.of.target..Original.))
+
+
+# length(unique(ADC.annots$Gene.symbol.of.target..Final.)) #148 total genes (but I have 141 gene targets due to ambiguity in symbols)
+```
+
+```{r}
+Treatment.Annots <- geneIDmap %>% 
+  filter(!is.na(Treatment.type)) %>% 
+  select(gene_name, Treatment.type:If.currently.in.clinical.trials..drug.trial.ID.number)
+
+head(Treatment.Annots)
+```
+
+```{r}
+deg_files <- dir("DEGs", pattern = "vs_NBM_DEGs", full.names = TRUE)
+
+# deg_files
+```
+
+```{r}
+ETS.Therapeutics <- purrr::map_dfr(deg_files, function(filename){
+  df <- read.csv(filename, comment.char = "#") %>% 
+    mutate(Fusion=gsub("^.+Family_([A-Z].+)_vs_NBM.+", "\\1", filename)) %>%
+    filter(!is.na(Treatment.type)) %>% 
+    filter(logFC > 0) %>% 
+    select(Fusion, gene, Treatment.type, everything())
+}) %>% 
+  arrange(gene) %>% 
+  mutate(Fusion=factor(gsub("ERG-HNRNPH1", "HNRNPH1-ERG" ,Fusion),
+                       levels=c("ETV6-MNX1","ETV6-Other", "FUS-ERG","HNRNPH1-ERG","ETS-Other"))) %>% 
+  arrange(gene,Fusion) 
+  
+
+
+head(ETS.Therapeutics)
+dim(ETS.Therapeutics) #58  27
+# table(ETS.Therapeutics$Fusion)
+# length(unique(ETS.Therapeutics$gene)) #27 genes
+```
+
+```{r}
+reformatted <-  ETS.Therapeutics %>% 
+  select(Fusion,gene, adj.P.Val, FoldChange) %>% 
+  mutate(present=1)  %>% 
+  
+  group_by(gene) %>%
+  mutate(Total=sum(present)) %>%
+  ungroup() %>%
+  arrange(desc(Total), gene) %>%
+  # filter(Total > 1) %>%
+
+  pivot_wider(id_cols=c(gene,Total),
+              names_from=Fusion, 
+              values_from=present) %>%
+  # rename_all(~gsub("-",".", .)) %>%
+  mutate(across(`ETV6-MNX1`:`ETS-Other`, ~replace_na(.x, replace = 0))) %>%
+  as.data.frame()
+
+
+head(reformatted)
+dim(reformatted)
+# any(duplicated(reformatted$gene)) #FALSE
+```
+
+```{r}
+colors <- c(
+        "ETV6-MNX1"="darkorchid1",
+        "FUS-ERG"="dodgerblue1",
+        "HNRNPH1-ERG"="firebrick2",
+        "ETS-Other"="darkturquoise",
+        "ETV6-Other"="darkorchid4")
+```
+
+```{r fig.height=10, fig.width=15}
+upset_plot <- upset(data = reformatted, 
+      mainbar.y.label="Number of\nShared Targets",
+      nsets=5,
+      # nintersects=8,
+      matrix.color="cyan4", 
+      main.bar.color="cyan4", 
+      sets.bar.color=colors,
+      sets.x.label="Number of Gene Targets\nper Fusion",
+      mb.ratio = c(0.4, 0.6),
+      order.by=c("freq","degree"),
+      decreasing=c(TRUE,TRUE),
+      point.size=5.5,
+      text.scale=c(2.75,2.75,2.0,2,3,3),
+      shade.color="grey80",
+      shade.alpha=0.25)
+
+
+# pdf("Figures/TARGET_AML_ETS-Fusions_Therapuetic_Targets_Upset_plot.pdf", height=10, width=15)
+upset_plot
+# dev.off()
+```
+
+```{r}
+dat <- ETS.Therapeutics %>% 
+  group_by(gene) %>% 
+  mutate(Total=n(), 
+         aveFC=mean(FoldChange)) %>% 
+  ungroup() %>% 
+  select(Fusion, gene, Treatment.type, logFC,FoldChange, adj.P.Val,Total, aveFC) %>% 
+  filter(Total >= 4) %>% 
+  arrange(desc(aveFC)) %>% 
+  mutate(gene=factor(gene, levels=rev(c("CD34","CD70","TNF","PROM1","IL2RA","PTK7","LY6E"))),
+         Fusion=factor(Fusion, levels=rev(levels(Fusion)))) 
+  
+
+foldchanges <- ggplot(dat,
+       aes(x=FoldChange, y=gene, color=Fusion, fill=Fusion)) +
+  # geom_point(aes(size=-log10(adj.P.Val))) +
+  geom_col(position = position_dodge(), width=0.7, 
+           alpha= scales::rescale(-log10(dat$adj.P.Val), to=c(0.5,1.0))) +
+  # ggrepel::geom_text_repel(data=) +
+  labs(x="Foldchange vs Normal Healthy Marrows", y="Therapeutic Target")+
+  scale_x_continuous(breaks=seq(0,30,by=2), limits = c(0,26)) +
+  scale_color_manual(values=colors) +
+  scale_fill_manual(values=colors) +
+  theme_bw() +
+  theme(axis.text = element_text(size=18, color="black"), 
+        axis.title = element_text(size=18),
+        legend.title = element_blank(),
+        legend.text = element_text(size=14),
+        legend.position = c(0.8,0.2),
+        legend.key.size = unit(4.5,"mm"))
+
+
+# pdf("Figures/TARGET_AML_ETS_Fusions_ADC_CART_foldchanges_vs_NBM_barplot.pdf", height = 6, width = 8)
+foldchanges
+# dev.off()
+```
+
+```{r heatmap_degs}
+input <- samples %>% 
+  filter(!grepl("OtherAML|CD34", ETS_Fusion_Groups)) %>% 
+  mutate(USI1=USI, USI=Sample) %>% 
+  droplevels() %>% 
+  set_rownames(.$Sample)
+
+p <- input$ETS_Fusion_Groups %>%
+  set_names(input$Sample) 
+
+temp <-  RColorBrewer::brewer.pal(n=5,"PiYG")
+temp[3] <- "khaki2"
+temp[6] <- "grey80"
+
+colors_list <- list(ETS_Fusion_Groups=c(
+                                        "NBM"="grey80",
+                                        "ETV6-Other"="darkorchid4",
+                                        "ETS-Other"="darkturquoise",
+                                        "HNRNPH1-ERG"="firebrick2",
+                                        "FUS-ERG"="dodgerblue1",
+                                        "ETV6-MNX1"="darkorchid1"), 
+                      Age.Category=set_names(temp, levels(input$Age.Category)))
+
+targets <- levels(dat$gene)
+```
+
+```{r}
+dends_res_de <- dge_dendrograms(expnData = logCPM[targets,input$Sample],
+                  pheno = p,
+                  log=TRUE,
+                  method = "ward.D2",
+                  # percent=0.01,
+                  # add.count=1,
+                  createDGE = FALSE,
+                  filterTopGenes = FALSE,
+                  genelist = targets)
+  
+all(targets %in% rownames(dends_res_de$TMMCPM))
+  
+anno_ADC <- DeGSEA::create_HA_Labs_Hmap(expn=dends_res_de$TMMCPM,
+                                      geneList = targets,
+                                      goi = targets,
+                                      cc = colors_list,
+                                      CDE = input,
+                                      cols  = names(colors_list))
+
+
+heatmap_degs <- ComplexHmap(mat = dends_res_de$TMMCPM, 
+              name = "Z-Scores",
+              scale=TRUE,
+              dge_dendrograms.res = dends_res_de,
+              hmap_anno_obj = anno_ADC$annoColumn, 
+              hmap_anno_obj_genes=anno_ADC$geneLabels)
+
+# heatmap_degs
+```
+
+```{r }
+expn_targets <- logCPM[targets,input$Sample] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("gene_name") %>% 
+  pivot_longer(cols=matches("^TARGET"), names_to="Sample", values_to="logCPM") %>% 
+  left_join(input, by="Sample") %>% 
+  mutate_at(vars(Group), ~gsub("AML","ETS-Fusion", .) %>% 
+              as.factor(.)) %>% 
+  mutate(gene_name=factor(gene_name, levels=c("CD34","CD70","TNF","PROM1","IL2RA","PTK7","LY6E"))) %>% 
+  mutate(alpha=ifelse(Group=="NBM", 0.6, 1.0))
+
+
+# expn_targets
+```
+
+```{r fig.height=6, fig.width=12}
+targets_violin <- ggplot(data=expn_targets, mapping=aes(x=gene_name, y=logCPM, fill=Group)) +
+  # geom_point(aes(color=Group), position = position_jitterdodge(dodge.width = 1.0)) +
+  geom_violin(draw_quantiles =c(0.5),scale="width", alpha=0.2, 
+              position = position_dodge(width = 1.0)) +
+  geom_point(aes(color=ETS_Fusion_Groups, group=Group), 
+             position = position_jitterdodge(jitter.width = 0.45, dodge.width = 1.0),
+             alpha=expn_targets$alpha) +
+
+  # geom_boxplot() +
+  labs(y="Gene Expression (log2 CPM)", x="Therapeutic Target") +
+  scale_fill_manual(values=c("cyan4", "grey80")) +
+  # scale_color_manual(values=c("cyan4", "grey80")) +
+  scale_color_manual(values=colors_list$ETS_Fusion_Groups) +
+  guides(color=guide_legend(nrow=1,override.aes = list(size=7)), fill=FALSE) +
+  theme_classic() +
+  theme(axis.text = element_text(size=18, color="black"), 
+        axis.title = element_text(size=18),
+        legend.title = element_blank(),
+        legend.text = element_text(size=16),
+        legend.position = "bottom",
+        legend.key.size = unit(10,"mm"))
+
+
+# pdf("Figures/TARGET_AML_ETS_Family_Fusions_ADC_CART_Target_Expression_violin_plots.pdf", height = 6, width = 10)
+targets_violin
+# dev.off()
+```
+
+
+
+# GSEA 
+
+```{r}
+library(gage)
+library(gageData)
+#create objects to hold the information from the datasets loaded above
+kg.hsa=kegg.gsets("hsa")
+    
+#Examine all Kegg genesets, signalling, metabolic
+kegg.sigmet.pathways <- names(kg.hsa$kg.sets)[kg.hsa$sigmet.idx]
+# kegg.sigmet.pathways
+
+```
+
+```{r}
+pathway_commons <- readRDS(file.path(PROJHOME,"0000.00.01_GSEA_geneSets_gmt/pathwayCommons/PathwayCommons12.All.hgnc.gmt.RDS"))
+
+# length(pathway_commons) #3971
+# head(pathway_commons)
+
+#Subset gene-sets that are too small or too large
+set_sizes <- sapply(pathway_commons, length)
+# range(set_sizes)
+
+pathway_commons <- pathway_commons[which(set_sizes >= 20 & set_sizes <= 500)]
+length(pathway_commons) #1301
+```
+
+```{r}
+SIF <- read.table(file.path(PROJHOME,"0000.00.01_GSEA_geneSets_gmt/pathwayCommons/SIF/PathwayCommons11.All.hgnc.sif"))
+
+# head(SIF)
+# dim(SIF)
+```
+
+```{r}
+genes_of_interest <- c(NBM_and_AML_DE,"ERG","ETV6","FLI1", "FEV")
+
+custom_networks <- lapply(genes_of_interest, function(x){
+  regex <- paste0("^", x,"$")
+  
+  subset <- SIF %>% 
+    filter(grepl(regex, V1) | grepl(regex, V3)) %>% 
+    select(V1, V3) %>% 
+    filter(!grepl("CHEBI", V1) |!grepl("CHEBI", V3)) %>%  
+    unlist() %>% 
+    unique() %>% 
+    .[!grepl("CHEBI", .)] %>% 
+    .[!grepl(regex, .)]
+  
+})
+names(custom_networks) <- paste0(genes_of_interest,".network")
+custom_networks <- custom_networks[sapply(custom_networks, length)>0]
+
+# custom_networks
+```
+
+
+```{r}
+custom_networks.df <- lapply(genes_of_interest, function(x){
+  regex <- paste0("^", x,"$")
+  
+  subset <- SIF %>% 
+    filter(grepl(regex, V1) | grepl(regex, V3)) %>% 
+    filter(!grepl("CHEBI", V1) |!grepl("CHEBI", V3)) %>%  
+    mutate(Interaction_Network=paste0(x,".network"))
+  
+}) %>% 
+  bind_rows()
+
+
+head(custom_networks.df)
+# table(custom_networks.df$Interaction_Network)
+# length(custom_networks.df)
+# length(genes_of_interest)
+```
+
+## vs AML
+
+```{r}
+DEGs_vs_AML <- readRDS("DEGs/TARGET_AML_ETS_Family_Fusions_vs_OtherAML_List_07.10.21.RDS")
+names(DEGs_vs_AML)
+
+GAGE_vs_AML <- lapply(names(DEGs_vs_AML), function(x){
+  
+  gage_from_pipeline(twoGroups_DEGs.res = DEGs_vs_AML[[x]], type = "expn",geneset = custom_networks, min_size = 0)
+
+})
+
+names(GAGE_vs_AML) <- names(DEGs_vs_AML)
+# length(GAGE_vs_AML)
+# saveRDS(GAGE_vs_AML, "GSEA/TARGET_AML_ETS_Family_Fusions_vs_OtherAML_GSEA_PathwayCommonsList_SIF_Networks_07.16.21.RDS")
+```
+
+```{r}
+GAGE_vs_AML <- readRDS("GSEA/TARGET_AML_ETS_Family_Fusions_vs_OtherAML_GSEA_PathwayCommonsList_SIF_Networks_07.16.21.RDS")
+# sapply(GAGE_vs_AML, length)
+# sapply(GAGE_vs_AML, names)
+```
+
+```{r warning=FALSE}
+res_vs_AML <- lapply(GAGE_vs_AML, extract_gage_res)
+
+
+
+res_vs_AML_clean <- lapply(names(res_vs_AML), function(x){
+  
+  df <- res_vs_AML[[x]]
+  df %>% 
+    mutate(Comparison=paste0(x,"vs OtherAML")) %>% 
+    separate(pathway,into=c("pathway","pathway_info"),sep="; ", extra="merge") %>% 
+    mutate_at(vars(pathway_info), ~case_when(
+      is.na(.) ~ "Gene network from Pathway Commons v11 SIF",
+      TRUE ~ .
+    )) %>% 
+    select(pathway, pathway_info, Comparison, everything())
+  
+})
+res_vs_AML <- res_vs_AML_clean
+names(res_vs_AML) <- names(GAGE_vs_AML)
+res_vs_AML <- res_vs_AML[sapply(res_vs_AML, nrow)>0]
+# lapply(res_vs_AML, head)
+
+# lapply(names(res_vs_AML),function(x) write.csv(res_vs_AML[[x]],
+#                                                paste0("GSEA/TARGET_AML_ETS_Family_",x,"_vs_OtherAML_GAGE_PathwayCommons.csv"),
+#                                                row.names = FALSE))
+
+```
+
+
+```{r}
+PTP4A3.MAPK.paths <- sapply(pathway_commons, function(x) any(grepl("^PTP4A3$", x)))
+# head(PTP4A3.MAPK.paths)
+
+# PTP4A3.MAPK.paths[PTP4A3.MAPK.paths]
+#`Signaling events mediated by PRL; datasource: pid; organism: 9606; idtype: hgnc symbol; URL: http://pathwaycommons.org/pc12/Pathway_473cd2531921b387a6d3600ab3ad0d34`
+# pathway_commons[PTP4A3.MAPK.paths]
+
+RAMP1.paths <- sapply(pathway_commons, function(x) any(grepl("^RAMP1$", x)))
+#`G alpha (s) signalling events; datasource: reactome; organism: 9606; idtype: hgnc symbol; URL: http://identifiers.org/reactome/R-HSA-418555`
+# pathway_commons[RAMP1.paths]
+
+# HPGD.paths <- sapply(pathway_commons, function(x) any(grepl("^HPGD$|^PGDH$|^PHOAR1$|^PGDH1$", x)))
+HPGD.paths <- sapply(pathway_commons, function(x) any(grepl("HPGD", x)))
+# pathway_commons[HPGD.paths]
+
+# lapply(res_vs_AML, function(x) filter(x, pathway %in% c("Signaling events mediated by PRL","G alpha (s) signalling events", 
+#                                                      "Prostaglandin and Leukotriene metabolism ( Prostaglandin and Leukotriene metabolism )",
+#                                                      "Arachidonic acid metabolism",
+#                                                      "Glutathione conjugation")))
+```
+
+```{r}
+MAPK.paths <- sapply(pathway_commons, function(x) any(grepl("^MAPK", x)))
+table(MAPK.paths)
+
+MAPK.paths <- names(pathway_commons[MAPK.paths]) %>% 
+  sapply(., str_split, pattern="; ") %>% 
+  sapply(., '[', 1) %>% 
+  unname(.)
+
+lapply(res_vs_AML, function(x) filter(x, pathway %in% MAPK.paths))
+```
+
+```{r}
+all_paths_up <- lapply(res_vs_AML, function(x) filter(x, stat.mean > 0) %>% pull( "pathway"))
+all_paths_dn <- lapply(res_vs_AML, function(x) filter(x, stat.mean < 0) %>% pull( "pathway"))
+
+# all_paths_up
+
+
+# common_paths <- multi_intersect(l=all_paths_up)
+common_paths #None in common to all
+
+
+
+# all_paths_up
+common_paths_dn <- multi_intersect(l=all_paths_dn)
+common_paths_dn #None in common to all
+```
+
+
+```{r}
+temp <- bind_rows(res_vs_AML) %>% 
+  arrange(pathway)
+
+shared_erg_genes <- multi_intersect(l=str_split(temp[temp$pathway=="ERG.network", "pathway_genes"], pattern = "; "))
+
+SIF %>%
+  filter(grepl("^ERG$", V1) | grepl("^ERG$", V3)) %>%
+  filter(V3 %in% shared_erg_genes)
+  # filter(V3 %in% str_split(temp[temp$pathway=="ERG.network", "pathway_genes"], pattern = "; ")[[3]])
+# filter(V1 %in% str_split(temp[temp$pathway=="ERG.network", "pathway_genes"], pattern = "; ")[[1]])
+```
+
+
+```{r}
+ERG_paths_up <- lapply(res_vs_AML[grep("ERG", names(res_vs_AML))], function(x) filter(x, stat.mean > 0) %>% pull( "pathway"))
+erg_common_paths <- intersect(ERG_paths_up$`ERG-HNRNPH1`, ERG_paths_up$`FUS-ERG`)
+erg_common_paths
+
+
+ERG_paths_up <- lapply(res_vs_AML[grep("ERG", names(res_vs_AML))], function(x) filter(x, pathway %in% erg_common_paths) %>% 
+                         select(1:9)) %>% 
+  bind_rows() %>% 
+  arrange(pathway)
+
+# View(ERG_paths_up)
+# write.csv(ERG_paths_up, "GSEA/ERG_Fusions_Common_Upregulated_Pathways_PathwayCommons.csv", row.names = FALSE)
+
+# DEGs.df$`ERG-HNRNPH1` %>% 
+#   filter(gene %in% custom_networks$HPGD.network)
+# 
+# DEGs.df$`FUS-ERG` %>% 
+#   filter(gene %in% custom_networks$HPGD.network)
+```
+
+```{r}
+all_paths_df <- res_vs_AML %>% 
+  bind_rows() %>% 
+  arrange(pathway)
+
+# all_paths_df
+```
+
+```{r}
+ETV6_paths_up <- lapply(res_vs_AML[grep("ETV6", names(res_vs_AML))], function(x) filter(x, stat.mean > 0) %>% pull( "pathway"))
+etv6_common_paths <- intersect(ETV6_paths_up$`ETV6-MNX1`, ETV6_paths_up$`ETV6-Other`)
+etv6_common_paths
+
+ETV6_paths_up <- lapply(res_vs_AML[grep("ETV6", names(res_vs_AML))], function(x) filter(x, pathway %in% etv6_common_paths) %>% 
+                         select(1:9)) %>% 
+  bind_rows() %>% 
+  arrange(pathway)
+
+# write.csv(ETV6_paths_up, "GSEA/ETV6_Fusions_Common_Upregulated_Pathways_PathwayCommons.csv", row.names = FALSE)
+
+
+# DEGs.df$`ETV6-Other` %>%
+#   filter(gene %in% custom_networks$PTP4A3.network)
+# # 
+# DEGs.df$`ETV6-MNX1` %>%
+#   filter(gene %in% custom_networks$PTP4A3.network)
+```
+
+
+```{r}
+# in_genes <- str_split(ETV6_paths_up[ETV6_paths_up$pathway=="PTP4A3.network", "pathway_genes"], pattern="; ") %>% 
+#   unlist()
+
+# in_genes <- str_split(all_paths_df[all_paths_df$pathway=="ERG.network", "pathway_genes"], pattern="; ") %>% 
+#   unlist()
+
+in_genes <- multi_intersect(l=str_split(all_paths_df[all_paths_df$pathway=="ERG.network", "pathway_genes"], pattern="; "))
+
+g <- "ERG"
+r <- paste0("^", g, "$")
+
+# SIF %>% 
+#   filter(grepl(r, V1) | grepl(r, V3)) %>% 
+#   filter(V1 %in% in_genes | V3 %in% in_genes)
+
+```
+
+
+
+
+### Enrichment plots 
+
+```{r}
+  # filter(pathway %in% c("hsa04657 IL-17 signaling pathway",
+  #                       "hsa05206 MicroRNAs in cancer",
+  #                       "hsa04110 Cell cycle",
+  #                       "hsa03040 Spliceosome",
+  #                       "hsa04670 Leukocyte transendothelial migration")) %>% 
+```
+
+hsa04657 IL-17 signaling pathway
+hsa05206 MicroRNAs in cancer
+hsa04110 Cell cycle
+hsa03040 Spliceosome
+hsa04670 Leukocyte transendothelial migration
+
+```{r fig.height=6, fig.width=7}
+etv6_results_vs_AML <- bind_rows(res_vs_AML) %>% 
+  filter(pathway %in% etv6_common_paths) %>% 
+  # filter(pathway %in% kegg.sigmet.pathways) %>% 
+  filter(grepl("ETV6", Comparison)) %>% 
+  filter(q.val < 0.05) %>% 
+  mutate(Comparison=gsub(" vs OtherAML", "", Comparison),
+         FDR=ifelse(round(q.val, digits = 3) == 0, 
+                      "FDR < 0.001", paste("FDR =",as.character(round(q.val, digits = 3))))) %>% 
+  group_by(pathway) %>% 
+  rename_at(vars(stat.mean), ~"Enrichment") %>% 
+  arrange(Enrichment) %>% 
+  ungroup() %>% 
+  mutate(pathway=factor(pathway, levels=unique(pathway))) %>% 
+  arrange(pathway)
+
+
+# etv6_results_vs_AML
+# quantile(etv6_results_vs_AML$stat.mean)
+
+# ggplot(etv6_results_vs_AML, aes(y=pathway, x=-log10(q.val), 
+#                                 color=Enrichment, size=-log10(q.val))) +
+#   geom_point()  +
+#   facet_wrap(~Comparison) +
+#   scale_size_continuous(range=c(3,10)) +
+#   scale_color_gradientn(colors = colorRampPalette(c("cyan", "magenta"))(299),na.value = "grey") +
+#   theme_bw() +
+#   theme(axis.ticks = element_line(color="black", size = 1),
+#         axis.text = element_text(size=12, color="black"),
+#         axis.title.y = element_text(size=16),
+#         legend.position = "top")
+```
+
+```{r}
+erg_results_vs_AML <- bind_rows(res_vs_AML) %>% 
+  filter(pathway %in% erg_common_paths) %>% 
+  # filter(pathway %in% kegg.sigmet.pathways) %>% 
+  filter(grepl("ERG", Comparison)) %>% 
+  filter(q.val < 0.05) %>% 
+  mutate(Comparison=gsub(" vs OtherAML", "", Comparison),
+         FDR=ifelse(round(q.val, digits = 3) == 0, 
+                      "FDR < 0.001", paste("FDR =",as.character(round(q.val, digits = 3))))) %>% 
+  group_by(pathway) %>% 
+  rename_at(vars(stat.mean), ~"Enrichment") %>% 
+  arrange(Enrichment) %>% 
+  ungroup() %>% 
+  mutate(pathway=factor(pathway, levels=unique(pathway))) %>% 
+  arrange(pathway)
+
+# ggplot(erg_results_vs_AML, aes(y=pathway, x=-log10(q.val), 
+#                                 color=Enrichment, size=-log10(q.val))) +
+#   geom_point()  +
+#   facet_wrap(~Comparison) +
+#   scale_size_continuous(range=c(3,10)) +
+#   scale_color_gradientn(colors = colorRampPalette(c("cyan", "magenta"))(299),na.value = "grey") +
+#   theme_bw() +
+#   theme(axis.ticks = element_line(color="black", size = 1),
+#         axis.text = element_text(size=12, color="black"),
+#         axis.title.y = element_text(size=16),
+#         legend.position = "top")
+```
+
+
+### Graph Networks
+
+https://support.bioconductor.org/p/74339/
+
+library(paxtoolsr)
+can visualize with igraph or other libraries
+library(igraph)
+
+my.gene <- "PTGS2"
+pc.result <-
+  graphPc(
+    source = my.gene, kind = "NEIGHBORHOOD", format = "BINARY_SIF", verbose = TRUE
+  )
+my.gene.flag <- pc.result$PARTICIPANT_B == my.gene
+ceo.flag <- pc.result$INTERACTION_TYPE == "controls-expression-of"
+ceo.frame <- pc.result[ceo.flag & my.gene.flag ,]
+lazy and sloppy elimintation of microRNAs
+ceo.frame <- ceo.frame[-grep("^MI", ceo.frame$PARTICIPANT_A) ,]
+g <-
+  graph.edgelist(as.matrix(ceo.frame[, c(1, 3)]), directed = FALSE)
+plot(g, layout = layout.fruchterman.reingold)
+
+```{r}
+all_paths_df <- res_vs_AML %>% 
+  bind_rows() %>% 
+  arrange(pathway)
+
+union_core_genes <- filter(all_paths_df, pathway=="PTP4A3.network" 
+                           | pathway=="HPGD.network") %>% 
+  pull(pathway_genes) %>% 
+  as.list() %>%
+  str_split(.,pattern = "; ") %>% 
+  multi_union(l=.) %>% 
+  .[!is.na(.)]
+
+union_core_genes
+```
+
+```{r}
+make_graph <- function(sif.pathways, logCPM,sample_ids_to_plot, 
+                       sample_ids_to_scale=NULL, make_plot=TRUE){
+  #sif.pathways is a dataframe with "from" and "to" columns 
+  #logCPM is the expression 
+  #a single vector or list of 2 that is the sample IDs from the logCPM matrix to be used for color scale for expression 
+  #sample_ids_to_scale is the samples IDs from the logCPM matrix to be used for gene-wise scaling to show level of over/under expression compared to the mean (eg AML vs NBM samples, or Fusion 1 vs OtherAML)
+  
+  
+  library(igraph)
+  library(RColorBrewer)
+  
+  numColors <- 10
+  colors <- colorRampPalette(brewer.pal(9,"Reds"))(numColors)
+
+  # Color the nodes based using the indicies and the color palette created above
+  # graph.edgelist requires a matrix
+  set.seed(1)
+  g <- graph.edgelist(as.matrix(sif.pathways[, c(1, 3)]), directed = FALSE)
+  
+  #mean log2 CPM expression 
+  if(!is.null(sample_ids_to_scale)){
+    logCPM.subset <- logCPM[,sample_ids_to_scale]
+  }else{
+    logCPM.subset <- logCPM
+  }
+  
+  # Scale values to generate indicies from the color palette
+  col_fun =  circlize::colorRamp2(seq(1,10,by=1), rev(viridis::inferno(10)))
+
+  #gene-wise scaling
+  expn <- t(scale(t(logCPM.subset), center = T, scale=T)) 
+  
+  if(is.list(sample_ids_to_plot)){
+    expn1 <- expn[names(V(g)), sample_ids_to_plot[[1]]]
+    expn1 <- apply(expn1, 1, mean)
+    names(expn1) <- paste0(names(expn1),".a")
+    
+    expn2 <- expn[names(V(g)), sample_ids_to_plot[[2]]]
+    expn2 <- apply(expn2, 1, mean)
+    names(expn2) <- paste0(names(expn2),".b")
+    
+    values <- c(expn1, expn2)
+    rescaled_values <- scales::rescale(values, to=c(1,10))
+    color_vector <- col_fun(x=rescaled_values)
+    
+    colors_a <- color_vector[grep(".a", names(color_vector))]
+    colors_b <- color_vector[grep(".b", names(color_vector))] 
+    
+    g1 <- set.vertex.attribute(g, "color", value = colors_a)
+    g2 <- set.vertex.attribute(g, "color", value = colors_b)
+    
+    graph_res <- list(g1, g2)
+    
+  }else{
+     expn.subset <- expn[names(V(g)), sample_ids_to_plot]
+     expn.subset <- apply(expn.subset, 1, mean)
+     rescaled_values <- scales::rescale(expn.subset, to=c(1,10))
+     graph_res <- set.vertex.attribute(g, "color", value = col_fun(newscale))
+  
+  }
+ 
+  
+
+  if(make_plot){
+    
+    # layout(matrix(c(1,1,2,1,1,2,3,4,4), nrow = 3, ncol = 0, byrow = TRUE))
+    lapply(graph_res, function(g){
+      plot(g, layout = layout.fruchterman.reingold, 
+         vertex.label.color= ifelse(rescaled_values < 3, "black","white"),
+         vertex.size=25, 
+         label.cex=0.75)
+    })
+
+    in.dat <- values[order(values)]
+    image(x=1, y=in.dat, z=t(seq_along(in.dat)), 
+        col=color_vector[names(in.dat)],
+        ylim=c(-0.8, 1.5),
+        xaxt = 'n', xlab="",
+        ylab="Mean Z-Score")
+
+
+  }else{
+    return(graph_res)
+  }
+
+
+}
+
+```
+
+```{r fig.height=10, fig.width=25}
+#How can I set the exact same color breaks for both plots??
+
+
+sif.pathways <- custom_networks.df %>% 
+  filter(Interaction_Network=="PTP4A3.network") %>% 
+           # Interaction_Network == "HPGD.network") %>%
+  filter(V1 %in% rownames(logCPM), V3 %in% rownames(logCPM)) %>% 
+  filter(V1 %in% union_core_genes | V3 %in% union_core_genes)
+
+
+OtherAML <- samples %>%
+  filter(ETS_Fusion_Groups=="OtherAML") %>%
+  pull(Sample)
+
+
+# pdf("TARGET_AML_PTP4A3_Network_in_ETS_Fusions_vs_OtherAML.pdf", height = 12, width = 25)
+# par(mfrow=c(1,3))
+
+#https://stackoverflow.com/questions/38810854/how-to-use-layout-function-in-r/38810909
+layout(matrix(c(1,1,2,1,1,2,3,4,4), nrow = 1, ncol = 3, byrow = TRUE))
+make_graph(sif.pathways = sif.pathways, 
+           logCPM = logCPM, 
+           sample_ids_to_plot = list(ETS.only$Sample,OtherAML), 
+           sample_ids_to_scale=c(ETS.only$Sample,OtherAML),
+           make_plot = TRUE)
+
+
+# dev.off()
+
+# NBM <- samples %>%
+#   filter(ETS_Fusion_Groups=="NBM") %>%
+#   pull(Sample)
+# 
+# make_graph(sif.pathways = sif.pathways,
+#            logCPM = logCPM,
+#            sample_ids_to_plot = NBM)
+```
+
+
+
+
+
+
+
+## Vs NBM 
+
+```{r}
+DEGs_vs_NBM <- readRDS("DEGs/TARGET_AML_ETS_Family_Fusions_vs_NBM_List_07.12.21.RDS")
+names(DEGs_vs_NBM)
+```
+
+
+```{r}
+GAGE_vs_NBM <- lapply(names(DEGs_vs_NBM), function(x){
+  
+  gage_from_pipeline(twoGroups_DEGs.res = DEGs_vs_NBM[[x]], type = "expn",geneset = pathway_commons)
+
+})
+
+names(GAGE_vs_NBM) <- names(DEGs_vs_NBM)
+length(GAGE_vs_NBM)
+saveRDS(GAGE_vs_NBM, "GSEA/TARGET_AML_ETS_Family_Fusions_vs_NBM_GSEA_PathwayCommons_List_07.16.21.RDS")
+
+# sapply(GAGE_vs_NBM, length)
+```
+
+```{r}
+res_vs_NBM <- lapply(names(GAGE_vs_NBM), function(x){
+  
+  res <- GAGE_vs_NBM[[x]]
+    
+  up_and_down_dfs <- list()
+  for(dir in c("Up","Dn")){
+      esset <- res[[paste0("essSets.", dir)]]$essentialSets
+      
+      core_genes <- res[[paste0("essSets.", dir)]]$coreGeneSets %>% 
+                      lapply(., paste, collapse="; ") %>% 
+                      as.data.frame(check.names=FALSE) %>% 
+                      gather(pathway, pathway_genes) 
+      
+      
+      gage_df <- res[[paste0("SigPaths.",dir)]] %>% 
+        as.data.frame() %>% 
+        rownames_to_column("pathway") %>% 
+        filter(pathway %in% esset) %>% 
+        mutate(Comparison=paste(x,"vs NBM")) %>% 
+        left_join(., core_genes, by="pathway")
+        
+      up_and_down_dfs[[dir]] <- gage_df
+    }
+    
+    output <- bind_rows(up_and_down_dfs) %>% 
+      select(pathway, Comparison,
+             c(p.geomean:set.size),
+             pathway_genes,
+             everything())
+    
+  return(output)
+  
+})
+
+names(res_vs_NBM) <- names(GAGE_vs_NBM)
+
+# sapply(res_vs_NBM, dim)
+# lapply(res_vs_NBM, head)
+```
+
+```{r}
+# lapply(names(res_vs_NBM),function(x) write.csv(res_vs_NBM[[x]], 
+#                                                paste0("GSEA/TARGET_AML_ETS_Family_",x,"_vs_NBM_GAGE.csv"),
+#                                                row.names = FALSE))
+```
+
+
+```{r}
+all_paths_up_NBM <- lapply(res_vs_NBM, function(x) filter(x, stat.mean > 0) %>% pull( "pathway"))
+# all_paths_up_NBM
+common_paths_NBM <- multi_intersect(l=all_paths_up_NBM)
+common_paths_NBM #None in common to all
+```
+
+```{r fig.width=10}
+all_results_vs_NBM <- bind_rows(res_vs_NBM) %>% 
+  filter(pathway %in% common_paths_NBM
+         # pathway %in% kegg.sigmet.pathways
+         ) %>% 
+  # filter(q.val < 0.05) %>% 
+  mutate(Comparison=gsub(" vs OtherAML", "", Comparison),
+         q.val=ifelse(round(q.val, digits = 3) == 0, 
+                      "FDR < 0.001", paste("FDR =",as.character(round(q.val, digits = 3))))) %>% 
+  group_by(pathway) %>% 
+  rename_at(vars(stat.mean), ~"Enrichment") %>% 
+  arrange(Enrichment) %>% 
+  ungroup() %>% 
+  mutate(pathway=factor(pathway, levels=unique(pathway))) %>% 
+  arrange(pathway)
+
+
+ggplot(all_results_vs_NBM, aes(y=pathway, x=Comparison, fill=Enrichment)) +
+  geom_tile(width=1.0) +
+  geom_text(aes(label = q.val)) +
+  # scale_x_discrete(expand = c(0.5,0)) +
+  # labs(x="", y="gene symbol") +
+  # coord_fixed() +
+  # scale_fill_viridis_c() +
+  # guides(fill=guide_legend(title="Enrichment")) +
+  scale_fill_gradientn(colors = colorRampPalette(c("cyan", "magenta"))(299),na.value = "grey") +
+  theme_classic() +
+  theme(axis.ticks = element_line(color="black", size = 1),
+        axis.text = element_text(size=12, color="black"),
+        axis.title.y = element_text(size=16), 
+        legend.position = c(-1.25,0.85))
+```
+
+
+# Expression plots 
+
+## Common DEGs
+
+```{r}
+common_all_expn <- CPM[common_all,samples$Sample] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("gene_name") %>% 
+  gather(Sample,CPM, -gene_name) %>% 
+  mutate(log2CPM=log2(CPM+1)) %>% 
+  left_join(., samples, by="Sample")
+
+head(common_all_expn)
+```
+
+```{r fig.width=20, fig.height=30}
+# ggplot(common_all_expn, aes(x=ETS_Fusion_Groups, y=CPM, fill=ETS_Fusion_Groups)) +
+#   geom_boxplot(draw_quantiles = 0.5) +
+#   facet_wrap(~gene_name, scales = "free", ncol=3) +
+#   theme_classic()
+```
+
+```{r fig.width=20, fig.height=15}
+common_expn_subset <- common_all_expn %>% 
+         filter(gene_name %in% NBM_and_AML_DE)
+
+# ggplot(common_expn_subset,
+#        aes(x=ETS_Fusion_Groups, y=CPM, fill=ETS_Fusion_Groups)) +
+#   # geom_violin(draw_quantiles = 0.5) +
+#   geom_boxplot() +
+#   facet_wrap(~gene_name, scales = "free", ncol=3) +
+#   theme_classic()
+
+
+# head(common_expn_subset)
+```
+
+```{r}
+z.scores <- common_expn_subset %>% 
+  filter(!grepl("CD34_PB", ETS_Fusion_Groups)) %>% 
+  group_by(gene_name) %>% 
+  mutate(z_score=(log2CPM-mean(log2CPM))/sd(log2CPM)) %>% 
+  ungroup() %>% 
+  select(gene_name:log2CPM, z_score, everything()) %>% 
+  
+  group_by(ETS_Fusion_Groups, gene_name) %>% 
+  summarise(Mean_Z_Score=mean(z_score)) %>% 
+  ungroup() %>% 
+  
+  
+  mutate_at(vars(ETS_Fusion_Groups), ~factor(., levels=c(
+                                                         "ETV6-MNX1","ETV6-Other","FUS-ERG",
+                                                         "HNRNPH1-ERG", "ETS-Other",
+                                                         "OtherAML","NBM"))) %>% 
+  
+  group_by(gene_name,) %>% 
+  arrange(desc(Mean_Z_Score)) %>% 
+  ungroup() %>% 
+  
+  mutate_at(vars(gene_name), ~factor(., levels=rev(unique(gene_name))))
+  
+  
+
+
+head(z.scores)
+```
+
+```{r fig.height=5, fig.width=13}
+# e <- z.scores$Mean_Z_Score
+len=29
+# start=-0.1
+# end=2
+# Breaks <- c(seq( start, 0, length.out=ceiling(len/2) + 1),
+#               seq(end/len, end, length.out=floor(len/2)))
+
+# # colorRampPalette(c("black","cyan", "magenta"))(len)
+# Breaks
+
+# pdf("Figures/TARGET_AML_ETS_Family_Fusions_Commonly_Overexpressed_Genes_7.28.21.pdf", height = 5, width = 13)
+ggplot(filter(z.scores),
+       aes(y=gene_name, x=ETS_Fusion_Groups, fill=Mean_Z_Score)) +
+  geom_tile() +
+  labs(x="", y="gene symbol") +
+
+  scale_y_discrete(expand=c(0,0)) +
+  scale_x_discrete(expand=c(0,0)) +
+  # scale_fill_viridis_c(values = c(0,0.2,0.4,1)) +
+  scale_fill_gradientn(colors = colorRampPalette(c("black","cyan",  "magenta"))(len),
+                       values = c(0,0.2,0.4,0.75,1)) + #c(0,0.2,0.4,0.6,1)
+  theme_minimal() +
+  theme(axis.ticks = element_line(color="black", size = 1),
+        axis.text.y = element_text(size=18, color="black"),
+        axis.text.x = element_text(size=14, color="black"),
+        legend.text = element_text(size=14),
+        axis.title.y = element_text(size=24))
+# dev.off()
+```
+
+
+
+```{r}
+geneIDmap %>% 
+  filter(gene_name %in% NBM_and_AML_DE) %>% 
+  select(gene_name, Cell_Adhesion_Gene, Cell_Surface_Protein, everything()) %>% 
+  arrange(Cell_Surface_Protein)
+```
+
+
+## ETS Family Genes
+
+```{r}
+ets.expn <- CPM[grep(ETS.re, rownames(logCPM)), samples$Sample] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("gene_name") %>% 
+  gather(Sample, CPM, -gene_name) %>% 
+  mutate(logCPM=log2(CPM+1)) %>% 
+  left_join(., samples, by="Sample") 
+  # filter(gene_name %in% common_all_nbm)
+  
+
+dim(ets.expn)
+head(ets.expn[,1:5])
+
+# table(unique(ets.expn$gene_name) %in% common_all_nbm)
+```
+
+Up-regulated (maybe not significantly...)
+ELF1
+ELF2 (less uniformly)
+ELF4 
+ERF (mostly ETV6-MNX1)
+ETS1 (mostly ETV6-MNX1)
+FLI1
+ERG
+
+```{r}
+input <- filter(ets.expn, grepl("^ERG$|^ETV6$|^FLI1$|^FEV$",gene_name))
+
+table(input$gene_name)
+
+comps <- list(c(""))
+```
+
+```{r}
+table()
+```
+
+```{r fig.width=20, fig.height=10, warning=FALSE}
+ggplot(input,
+       aes(x=ETS_Fusion_Groups, y=CPM, fill=ETS_Fusion_Groups)) +
+  geom_point(aes(color=ETS_Fusion_Groups), position = position_jitterdodge()) +
+  geom_violin(draw_quantiles = 0.5,scale="width",  adjust=1.1, alpha=0.4) +
+  # geom_boxplot() +
+  facet_wrap(~gene_name, scales = "free", ncol=3) +
+  theme_classic() +
+  theme(legend.position = "top")
+```
+
+
+# Heatmaps with DEGs
+
+
+
+## correlation  heatmap 
+
+```{r}
+source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/corrplot_Function.r")
+```
+
+```{r}
+fus.erg <- get(load("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.01.08_t.16.21/TARGET_AML_1031_FUS.ERG_and_RUNX1.CBFA2T3_vs_OtherAML_DEGs_list.RData"))
+
+```
+
+```{r}
+fus.erg.degs <- read.csv("/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.01.08_t.16.21/TARGET_AML_1031_FUS.ERG_vs_OtherAML_DEGs.csv", row.names = 1)
+
+head(fus.erg.degs)
+```
+  # # mutate(Num.Status=factor(Status, levels=c( "NBM",
+  # #                                            "CBFA2T3.GLIS2",
+  # #                                            "DEK.NUP214",
+  # #                                            "ETS",
+  # #                                            "NUP98.KDM5A",
+  # #                                            "NUP98.NSD1",
+  # #                                            "RBM15.MKL1",
+  # #                                            "OtherAML"))) %>%
+```{r}
+df <- filter(ETS.df, Gene=="ELF1") %>%
+  select(USI,Status=ETS.Family.Fusions) %>% 
+  mutate(Status=factor(Status, levels=c( "NBM",
+                                             "CBFA2T3.GLIS2",
+                                             "DEK.NUP214",
+                                             "ETS_Fusions",
+                                             "NUP98.KDM5A",
+                                             "NUP98.NSD1",
+                                             "RBM15.MKL1",
+                                             "OtherAML"))) %>%
+  mutate(Num.Status=as.numeric(Status))
+
+head(df)
+
+dim(df)
+```
+
+
+```{r}
+pal <- brewer.pal(min(n,9), "Set1") %>% 
+      gsub("#F781BF", "burlywood2", .) %>%
+      c(., "turquoise3", "blue", "black","seagreen2", "maroon", 
+        "orchid", "cornflowerblue",  "darkblue", "azure4", "chartreuse1", 
+        "darkmagenta","orange1", "deeppink", "darkslategray1",
+        "green4", "navajowhite2","brown3", "darkgoldenrod3", "deepskyblue1", 
+        "lightcoral", "mediumorchid", "saddlebrown")
+
+pal
+```
+
+```{r}
+g_legend <- function(a.gplot){ 
+  tmp <- ggplot_gtable(ggplot_build(a.gplot)) 
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box") 
+  legend <- tmp$grobs[[leg]] 
+  return(legend)} 
+
+l <- g_legend(color.Legend)
+grid.newpage()
+grid.draw(l)
+```
+
+```{r}
+l2 <- cowplot::get_legend(color.Legend)
+
+ggdraw(l2)
+```
+
+
+
+```{r}
+
+n <- 8
+col <- pal[1:n]
+
+subset <- df %>%
+  select(Status, Num.Status) %>%
+  arrange(Num.Status) %>%
+  unique() %>%
+  mutate(colors=col)
+
+head(subset)
+
+color.Legend <- ggplot(subset, aes(x=Status, y=0.25, fill=Status)) + 
+  geom_bar(stat = "identity") + 
+  scale_fill_manual(values=col) +
+  theme(legend.text = element_text(size=15))
+
+# table(df$Status,df$Num.Status, useNA = "always")
+```
+
+```{r}
+e <- tpm.RBD[fus.erg.degs$gene,]
+cp <- corPlot_withColorBar(expnData = e, CDE=df, log2=FALSE,offset = 22, diag.point.size = 15)
+```
+
+```{r}
+library(cowplot)
+# tiff("ETS_Fusions_withFUS.ERG_DEGs_CorrPlot.tiff", units="in", height=5, width=5, res=300)
+ggdraw(cp$legend)
+# dev.off()
+```
+
+```{r fig.height=10, fig.width=10}
+# tiff("TARGET_AML_RBD_FUS.ERG_withOtherETS_Corplot.tiff", height = 10, width = 10, units = "in", res=300)
+cp$heatmap2
+# dev.off()
+
+# write.csv(table(df$Status),"Freq.csv", row.names = FALSE)
+```
+
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+
+
+# Old Code
+
+```{r}
+res_vs_AML <- lapply(names(GAGE_vs_AML), function(x){
+  
+  res <- GAGE_vs_AML[[x]]
+  if(length(res) == 4){
+      esset <- res[["essSets.Up"]]$essentialSets
+      
+      core_genes <- res[["essSets.Up"]]$coreGeneSets %>% 
+                      lapply(., paste, collapse="; ") %>% 
+                      as.data.frame(check.names=FALSE) %>% 
+                      gather(pathway, pathway_genes) 
+      
+      gage_df <- res[["SigPaths.Up"]] %>% 
+        as.data.frame() %>% 
+        rownames_to_column("pathway") %>%
+        filter(pathway %in% esset) %>%
+        mutate(Comparison=paste(x,"vs OtherAML")) %>% 
+        left_join(., core_genes, by="pathway")
+      
+      dn <- res[["SigPaths.Dn"]] %>% 
+        as.data.frame() %>% 
+        rownames_to_column("pathway") %>% 
+        mutate(Comparison=paste(x,"vs OtherAML")) 
+        
+    output <- bind_rows(gage_df, ) %>% 
+              select(pathway, Comparison,
+                   c(p.geomean:set.size),
+                   pathway_genes,
+                   everything())
+          
+    
+  }else{
+    
+    up_and_down_dfs <- list()
+    for(dir in c("Up","Dn")){
+      esset <- res[[paste0("essSets.", dir)]]$essentialSets
+      
+      core_genes <- res[[paste0("essSets.", dir)]]$coreGeneSets %>% 
+                      lapply(., paste, collapse="; ") %>% 
+                      as.data.frame(check.names=FALSE) %>% 
+                      gather(pathway, pathway_genes) 
+      
+      
+      gage_df <- res[[paste0("SigPaths.",dir)]] %>% 
+        as.data.frame() %>% 
+        rownames_to_column("pathway") %>% 
+        filter(pathway %in% esset) %>%
+        mutate(Comparison=paste(x,"vs OtherAML")) %>% 
+        left_join(., core_genes, by="pathway")
+        
+      up_and_down_dfs[[dir]] <- gage_df
+    }
+    
+    output <- bind_rows(up_and_down_dfs) %>% 
+      select(pathway, Comparison,
+             c(p.geomean:set.size),
+             pathway_genes,
+             everything())
+  }
+    
+  return(output)
+  
+})
+
+names(res_vs_AML) <- names(GAGE_vs_AML)
+```

@@ -1,0 +1,718 @@
+---
+title: 'ETS Family Mutations and Fusions in 0531'
+author: "Jenny Smith"
+date: "July 7, 2021"
+output: html_document
+---
+
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = file.path(PROJHOME, '2018.03.19_ETSfamilyFusions_DEGs/'))
+```
+
+```{r}
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),
+                      tidy=TRUE,
+                      fig.align='center',
+                      fig.width = 10, fig.height = 10)
+node=Sys.info()[["nodename"]]
+if(!grepl("local", node)){
+  print(node)
+  options(bitmapType = 'cairo')
+  grDevices::X11.options(type='cairo')
+}
+
+options(stringsAsFactors = FALSE)
+table = function (..., useNA = 'ifany') base::table(..., useNA = useNA)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(gridExtra)
+library(DeGSEA)
+library(edgeR)
+getwd()
+```
+
+# Define Functions
+
+```{r}
+classify_ISCN_fusions <- function(ISCN, Additional_Fusions=NULL,retdata=FALSE){
+  #ISCN which is a character string of the patient ISCN
+  #Additional_Fusions is a dataframe with the ISCN data with the columns, "Fusion" and "Cytogenetics"
+  #retdata is a boolean to return the reference dataframe "ref" which contains the fusion and regex searched for. 
+  
+  create_regex <- function(cytogenetics){
+      #cytogenetics is a character string with the "ideal" cytogentic abnormality, eg t(16;21)(p11;q22) 
+      input <- cytogenetics
+      splits <- unlist(str_split(input, pattern = "\\(|\\)"))
+      type <- splits[1]
+      chroms <- splits[2]
+      arms <- unlist(str_split(splits[4], pattern=";")) 
+      
+      if(grepl("^t$|^ins$", type)){
+         
+        arms <- arms %>% 
+           paste0(., ".{0,3}") %>% 
+           paste(., collapse = ";")
+        
+        #regex for a 4 way translocation. 
+        #however, it does not capture 3-4 way transloations where the fusion of interest is divied
+        #eg t(9;11;20) is found for KMT2A-MLLT3, but t(9;10;11) would be KMT2A-other 
+        iscn_chrs_start <- "\\(\\d{0,2};?"
+        iscn_chrs_end <-  ";?\\d{0,2}\\)"
+        iscn_arms_start <- "\\([pq]?.{0,};?"
+        iscn_arms_end <- ";?[pq]?.{0,}\\)"
+        
+        
+      }else if(grepl("^inv$", type)){
+        
+        arms.splits <- unlist(str_split(arms, pattern = "")) 
+        indices <- which(grepl("[pq]", arms.splits)) #TODO: oof what about inversions with 3pq bands? 
+        
+        arm1 <- substr(arms, start=1, stop=indices[2]-1)
+        arm2 <- substr(arms, start=indices[2],stop = nchar(arms))
+        arms <- paste0(c(arm1,arm2), ".{0,3}") %>% 
+          paste(., collapse = ";?")
+        
+        iscn_chrs_start <- "\\("
+        iscn_chrs_end <-  "\\)"
+        iscn_arms_start <- "\\("
+        iscn_arms_end <- "\\)"
+        
+      }
+     
+      abnormality_chrs <- paste0(type,iscn_chrs_start,chroms,iscn_chrs_end)
+      abnormality_arms <- paste0(iscn_arms_start, arms, iscn_arms_end)
+      regex <- paste0(abnormality_chrs, abnormality_arms)
+      
+      return(regex)
+  }
+  
+  
+  #Create a stable reference table. This can be added onto as time goes on. 
+  ref <- tibble(Fusion=c(#Cryptics/M7/FLT3-ITD associated.
+                     "NUP98-NSD1",
+                     "NUP98-KDM5A",
+                     "NUP98-X",
+                     "DEK-NUP214",
+                     "CBFA2T3-GLIS2",
+                     
+                     #KMT2A 
+                     "KMT2A-MLLT3", 
+                     "KMT2A-MLLT10",
+                     "KMT2A-MLLT4",
+                     "KMT2A-ELL",
+                     "KMT2A-MLLT1", 
+                     "KMT2A-X",
+                     
+                     #MECOM
+                     "MECOM-RPN1",
+                     
+                     #CBF
+                     "RUNX1-RUNX1T1", 
+                     "CBFB-MYH11"),
+            Cytogenetics=c("t(5;11)(q35;p15)",
+                           "t(11;12)(p15;p13)",
+                           "t(11; )(p15; )", 
+                           "t(6;9)(p22;q34)",
+                           "inv(16)(p13q24)",
+                           "t(9;11)(p21;q23)",
+                           "t(10;11)(p12;q23)",
+                           "t(6;11)(q27;q23)",
+                           "t(11;19)(q23;p13.1)",
+                           "t(11;19)(q23;p13.3)",
+                           "t(11; )(q23; )",
+                           "inv(3)(q21q26)",
+                           "t(8;21)(q22;q22)",
+                           "inv(16)(p13q22)"), #to fill in!
+            Cyto.Regex=c( #Cryptics/M7/FLT3-ITD associated.
+                         "t\\(\\d{0,2};?5;11;?\\d{0,2}\\)\\([pq]?.{0,};?p35;p15.{0,}\\)", 
+                         "t\\(\\d{0,2};?11;12;?\\d{0,2}\\)\\([pq]?.{0,};?p15;p13.{0,}\\)", 
+                         #NUP98-X needs to include inv(11)(p15)
+                         "(t|ins)\\((\\d{0,2}|[XY]);11\\)\\([pq]?.{0,4};p15.{0,3}\\)|(t|ins)\\(11;(\\d{0,2}|[XY])\\)\\(p15.{0,3};[pq]?.{0,4}\\)|inv\\(11\\)\\([q]?.{0,4}p15[q]?.{0,4}\\)",
+                         
+                         "t\\(\\d{0,2};?6;9;?\\d{0,2}\\)\\([pq]?.{0,};?p2[23];q34.{0,}\\)",
+                         "inv\\(16\\)\\(p13;?q24\\)", 
+                         
+                         #KMT2A
+                         "t\\(\\d{0,2};?9;11;?\\d{0,2}\\)\\s?\\([pq]?.{0,};?p2\\d;q23.{0,}\\)", 
+                         "(t|dic|ins)\\(\\d{0,2};?10;11;?\\d{0,2}\\)\\([pq]?.{0,};?p1[23].{0,2};q23.{0,}\\)",  #46,XY,ins(10;11)(p12;q23q13)[18]/46,XY[2]
+                         "t\\(\\d{0,2};?6;11;?\\d{0,2}\\)\\([pq]?.{0,};?q2\\d;q23.{0,}\\)", 
+                         "t\\(\\d{0,2};?11;19;?\\d{0,2}\\)\\([pq]?.{0,};?q23;?p13.1.{0,}\\)", 
+                         "t\\(\\d{0,2};?11;19;?\\d{0,2}\\)\\([pq]?.{0,};?q23;?p13.[23].{0,}\\)", 
+                         #KMT2A-X Needs to include inv(11)(q23) and needs to be broaded for three way translocations w/ 11 in the middle t( ;11; )( ;q23; )
+                         "(t|ins)\\((\\d{0,2}|[XY]);11\\)\\([pq]?.{0,4};q23|(t|ins)\\(11;(\\d{0,2}|[XY])\\)\\(q23;[pq]?.{0,4}\\)|inv\\(11\\)\\([q]?.{0,4}q23[q]?.{0,4}\\)",
+                         
+                         #MECOM
+                        "inv\\(3\\)\\(q21.{0,3};?q26.{0,3}\\)|t\\(3;3\\)\\(q2[16].{0,3};q2[16].{0,3}\\)|ins\\(3;3\\)\\(q2[16].{0,3};q2[16].{0,3}\\)",
+                         
+                         #CBF
+                         "t\\(\\d{0,2};?8;21;?\\d{0,2}\\)\\([pq]?.{0,4};?q22.{0,3};?q22.{0,3};?.{0,}\\)|(t|ins)\\(21;8\\)|ins\\(8;21\\)", # TODO: update this for more 21;8 translocations!
+                          #http://atlasgeneticsoncology.org/Anomalies/inv16ID1036.html do we count del(16)??
+                         "inv\\(16\\)\\(p13.{0,3}q22\\)|t\\(16;16\\)\\(p13.{0,3}q22|ins\\(16;16\\)\\(p13.1;?q22|del\\(16\\)\\(q22.{0,3}\\)")) 
+  
+  
+  #Add in additional fusions to the reference data
+  if(!is.null(Additional_Fusions)){
+    
+    #Create the column with the cytogenetics string 
+    Additional_Fusions <- Additional_Fusions %>% 
+      rowwise() %>% 
+      mutate(Cyto.Regex=create_regex(Cytogenetics)) %>% 
+      ungroup()
+    
+    #Merge it in with the reference dataset already here 
+    ref <- bind_rows(ref, Additional_Fusions) 
+  }
+  
+  #return the dataframe with the regular expressions in it
+  if(retdata){
+    return(ref)
+  }
+  
+  
+  #or grep for the regular expression in the input ISCN string
+  ref <- ref %>%  
+    as.data.frame() %>% 
+    set_rownames(.$Fusion)
+  
+  res <- sapply(ref[["Fusion"]], function(fusion){
+    ifelse(grepl(ref[fusion, "Cyto.Regex"], ISCN), fusion, "")
+  })
+  
+  res <- res[res!=""]
+  if(length(res)==0){
+    res=""
+  }else if (length(res) > 1){
+    res <- ifelse(any(grepl("KMT2A-[ME]", res)) & any(grepl("KMT2A-X", res)), 
+                  res[res!="KMT2A-X"], paste0(res, collapse = "; "))
+  }
+  
+   # print(res)
+  return(res)
+}
+```
+
+```{r}
+#From Atlas of Genetics
+
+# t(5;21)(q35;q22) HNRNPH1/ERG
+# 12p13.2 ETV6-other 
+# 21q22.2  ERG-other
+# 2q35 FEV-other 
+# 11q24.3 FLI1-other
+
+inputs <- data.frame(Fusion=c("FUS-ERG",
+                     "CBFA2T3-RUNX1",
+                     "ETV6-MNX1",
+                     "KAT6A-CREBBP",
+                     "NPM1-MLF1",
+                     "RBM15-MKL1"),
+              Cytogenetics=c("t(16;21)(p11;q22)", 
+                             "t(16;21)(q24;q22)",
+                             "t(7;12)(q36;p13)",
+                             "t(8;16)(p11;p13)",
+                             "t(3;5)(q25;q34)",
+                             "t(1;22)(p13;q13)"))
+
+
+# inputs
+```
+
+
+
+
+
+# ClinData
+
+```{r}
+merged <- read.csv(file.path(CDE,"Merged/TARGET_AML_0531_1031_merged_CDEs_05.21.21.csv"),
+                   na.strings = c("#N/A", "NA", ".",""))
+
+inelig <- merged %>% 
+  filter(Eligibility_Comments == "remove") %>% 
+  pull(USI)
+
+merged <- merged %>% 
+  filter(Eligibility_Comments != "remove")
+
+
+dim(merged) 
+```
+
+
+
+# Gene Annotations
+
+```{r}
+ETS <- read.csv(file.path(HOME, "0000.00.02_Reference_GeneInfo/ETS_transcription_factor_family_HGNC.csv"), 
+                stringsAsFactors = FALSE)
+head(ETS)
+# dim(ETS) #28  5
+# View(ETS)
+
+ETS.re <- paste(c("ETS",ETS$Approved.Symbol), collapse = "|")
+```
+
+
+# Select Patient Cohort
+
+Groups:
+1) ETV6-MNX1
+2) FUS-ERG
+3) ETV6-Other
+4) ETS-Other
+
+t(5;21)(q35;q22) HNRNPH1/ERG
+
+
+```{r}
+full_cohort <- merged %>% 
+  
+  #Fix the reciprocals
+  mutate_at(vars(Primary.Fusion), ~gsub("HNRNPH1-ERG", "ERG-HNRNPH1", Primary.Fusion)) %>% 
+  
+  # I cannot figure out if TCF25 IS or is not an ETS or ETS subfamily gene. uggh.
+  mutate_at(vars(AML_Subtype), ~ifelse(Primary.Fusion=="FUS-TCF25", "AML, NOS", .)) %>% 
+  
+  
+  #Define the ETS fusion column for those patients who had ETS-fusion as an additional fusoin.
+  #So cohort fusions can be found in one column
+  mutate(ETS_Fusion=case_when(
+    AML_Subtype == "ETS-Fusion" &  grepl(ETS.re,Primary.Fusion) ~ Primary.Fusion,
+    AML_Subtype == "ETS-Fusion" &  grepl(ETS.re,Additional.Fusions.CNV) ~ Additional.Fusions.CNV, 
+    grepl("CD34|NBM", Group) ~ Group,
+    TRUE ~ "OtherAML")) %>% 
+  
+  #ETS deletions by karyotype only N=3. often (2/3)  co-occur with other driver fusions. so dont consider them to ETV6 fusions.
+  mutate_at(vars(ETS_Fusion), ~case_when(
+    grepl("ETV6 \\(deletion\\)", .) ~ "OtherAML",
+    TRUE ~ .)) %>% 
+  
+  mutate(Abnormal.karyotype=case_when(
+     grepl("Normal", Primary.Cytogenetic.Code) ~ "Normal Karyotype",
+     grepl("^46,X[XY].[0-9]{1,2}.$|^46,X[XY].[0-9]{1,2}.\\s(REPORT|report)|^46,?X[XY]$",ISCN) ~ "Normal Karyotype",
+     ISCN=="Unknown" ~ "Unknown",
+     TRUE ~ "Abnormal")) %>%
+  
+  
+  #Define additional fusions by karyotype
+   rowwise() %>%
+  mutate(Fusion_Update=case_when(
+    grepl("Need.to.complete", Primary.Fusion) & Abnormal.karyotype=="Normal Karyotype" ~ "None", #these are NKs with only cyto genetics. so call them None even though there are likely cryptics here CBFGLIS, KDM5A, and NSD1. But without PCR assays or transcriptomics, no way to classify. 
+    grepl("Need.to.complete", Primary.Fusion) ~ classify_ISCN_fusions(ISCN, Additional_Fusions = inputs), 
+    TRUE ~ "")) %>%
+  ungroup() %>% 
+  mutate_at(vars(Primary.Fusion), ~case_when(
+    .=="Need.to.complete" & grepl("717811$|712993$",Reg.) ~ "KMT2A", #by FISH and uncommon ISCN
+    .=="Need.to.complete" & Fusion_Update != "" ~ Fusion_Update,
+    .=="Need.to.complete" & grepl("t\\(1;22;15;3\\)\\(p13;q13;q24;q25\\)", ISCN) ~ "RBM15-MKL1",
+    .=="Need.to.complete" & grepl("t\\(5;21;8\\)\\(q13;q22;q22\\)|t\\(1;21;8\\)\\(q32;q22;q22\\)", ISCN) ~ "RUNX1-RUNX1T1",
+    .=="Need.to.complete" & grepl("t\\(1;21;8;20\\)\\(q32;q22;q22;p13\\)", ISCN) ~ "RUNX1-RUNX1T1",
+    .=="Need.to.complete" & grepl("t\\(6;21;8\\)\\(p25;q22;q22\\)", ISCN) ~ "RUNX1-RUNX1T1",
+    .=="Need.to.complete" & !grepl("(t|ins|inv)\\([0-9XY]{1,2};|der\\([0-9XY]{1,2};", ISCN) ~ "None", #these don't have inversions/translocations/insertions. Only have CNVs.
+    TRUE ~ .)) %>% 
+  
+  
+
+  #Define binary columns for the DE analysis
+  mutate(FUS.ERG=case_when(
+                ETS_Fusion=="FUS-ERG" ~ "Yes",
+                grepl("CD34|NBM", Group) ~ Group,
+                ETS_Fusion=="OtherAML" ~ "OtherAML"),
+         ERG.HNRNPH1=case_when(
+               ETS_Fusion=="ERG-HNRNPH1" ~ "Yes",
+               grepl("CD34|NBM", Group) ~ Group,
+               ETS_Fusion=="OtherAML" ~ "OtherAML"),
+         ETV6.MNX1=case_when(
+                ETS_Fusion=="ETV6-MNX1" ~ "Yes",
+                grepl("CD34|NBM", Group) ~ Group,
+                ETS_Fusion=="OtherAML" ~ "OtherAML"),
+         ETV6.Other=case_when(
+                grepl("ETV6", ETS_Fusion) & ETS_Fusion != "ETV6-MNX1" ~ "Yes",
+                grepl("CD34|NBM", Group) ~ Group,
+                ETS_Fusion=="OtherAML" ~ "OtherAML"),
+         ETS.Other=case_when(
+                  grepl("CD34|NBM", Group) ~ Group,
+                  !grepl("FUS-ERG|ETV6|ERG-HNRNPH1", ETS_Fusion) & ETS_Fusion != "OtherAML" ~ "Yes", #May consider having to pull out ERG-HNRNP1 due N=8, so half of this cohort.
+                  ETS_Fusion=="OtherAML" ~ "OtherAML")) %>% 
+    
+  #Define ETS fusion groups for outcome/clinical and data visualization
+  mutate(ETS_Fusion_Groups=case_when(
+                grepl("CD34|NBM", Group) ~ Group,
+                ETS_Fusion=="FUS-ERG" ~ ETS_Fusion,
+                ETS_Fusion=="ETV6-MNX1" ~ ETS_Fusion,
+                ETS_Fusion=="ERG-HNRNPH1" ~ ETS_Fusion,
+                grepl("ETV6", ETS_Fusion) & ETS_Fusion != "ETV6-MNX1" ~ "ETV6-Other",
+                !grepl("FUS-ERG|ETV6|ERG-HNRNPH1", ETS_Fusion) & ETS_Fusion != "OtherAML" ~ "ETS-Other",
+                ETS_Fusion=="OtherAML" ~ "OtherAML")) %>% 
+  
+  
+  mutate_at(vars(Age.Category), ~factor(., levels=c("Less than 3 years", 
+                                                    "Between 3 and 5 years", 
+                                                    "Between 5 and 10 years",
+                                                    "Between 10 and 18 years",
+                                                    "Greater than 18 years"))) %>% 
+  
+  
+  filter(Sample %in% colnames(cts)) %>% 
+  filter(!USI %in% inelig) %>% 
+  mutate_at(vars(SNVs, Mutations.Category), ~ifelse(is.na(.), Group, .)) %>% 
+  select(Reg., USI,ETS_Fusion,ETS_Fusion_Groups,FUS.ERG:ETS.Other, everything()) %>% 
+  set_rownames(.$Sample)
+
+
+dim(samples) #1567  165
+# table(samples$Group)
+# table(samples$AML_Subtype)
+head(samples)
+# table(samples$SNVs)
+# write.csv(samples,"TARGET_AML_ETS_Family_Fusions_Cohort_7.7.21.csv", row.names = FALSE)
+```
+
+```{r}
+sapply(select(samples, FUS.ERG:ETS.Other), table)
+table(samples$ETS_Fusion_Groups)
+```
+
+```{r}
+ETS.only <- samples %>% 
+  filter(grepl("ETS-Fusion", AML_Subtype)) %>% 
+  arrange(ETS_Fusion_Groups,ETS_Fusion) 
+
+
+dim(ETS.only)
+# write.csv(select(ETS.only, USI, Protocol, ETS_Fusion,ETS_Fusion_Groups,
+#                  Primary.Fusion,
+#             Additional.Fusions.CNV,Cyto_vs_Seq_Fusions,
+#             ISCN), "TARGET_AML_ETS_Fusion_Cohort_Check.csv",row.names = FALSE)
+```
+
+
+# Subset Counts 
+
+```{r}
+in_cts <- cts[,samples$Sample]
+
+
+AML <- ! grepl("BM[0-9]|R[O0][0-9]", colnames(in_cts))
+keep <- rowSums(cpm(in_cts[,AML]) >= 1) >= 0.025*ncol(in_cts[,AML])
+cts.filtered <- in_cts[keep, ]
+
+dge <- DGEList(counts=cts.filtered)
+dge <- calcNormFactors(dge,method = "TMMwsp")
+
+logCPM <- edgeR::cpm(dge,log=TRUE,normalized.lib.sizes=TRUE, prior.count=1)
+CPM <- edgeR::cpm(dge,log=FALSE,normalized.lib.sizes=TRUE, prior.count=1)
+
+dim(logCPM) #
+head(logCPM[,1:5])
+```
+
+
+```{r}
+# ETS.only %>%
+#   group_by(ETS_Fusion) %>%
+#   count() %>%
+#   ungroup() %>%
+#   arrange(desc(n))
+
+#There are 4 with notable co-occuring mutations that need to be checked 
+# ETS.only %>% 
+#   filter(grepl("KMT2A-MLLT3|NUP98-HOXD13|PICALM-MLLT10|DEK-NUP214", Primary.Fusion))
+```
+
+
+# Examine Exon Breakpoints
+
+```{r}
+exons_df <- read.csv("Fusions/TARGET_AML_ETS_Family_Fusions_Primary_Breakpoints_Exons_7.14.21.csv", row.names = 1)
+
+dim(exons_df)
+head(exons_df)
+```
+
+
+```{r}
+ETS.exons <- ETS.only %>% 
+  left_join(., select(exons_df,-ETS_Fusion, -ETS_Fusion_Groups),
+            by="Sample") %>% 
+  select(USI, Age.Category,ETS_Fusion, ETS_Fusion_Groups,Fusion.Category,
+         geneA:Breakpoint_Order,
+         everything())
+
+
+dim(ETS.exons)  
+head(ETS.exons)
+```
+
+The samples whose primary.fusion was NOT the ETS fusion, they need to have thier breakpoints analyzed. 
+-To DO:
+ERG-DDX17
+ABL1-ETV6
+
+```{r}
+ETS.exons %>% 
+  select(USI, Age.Category,ETS_Fusion, ETS_Fusion_Groups,Fusion.Category, Breakpoint_Order:Breakpoint) %>% 
+  arrange(ETS_Fusion_Groups, ETS_Fusion)
+```
+
+
+```{r}
+ETV6.subset <- ETS.exons %>% 
+  filter(grepl("ETV6", geneA) | grepl("ETV6", geneB)) %>% 
+  arrange(ETS_Fusion_Groups, Exons) %>% 
+  mutate(E123.Hits=grepl("1_|2_|3_",Exons))
+
+# ETV6.subset
+dim(ETV6.subset)
+table(ETV6.subset$E123)
+```
+
+
+```{r}
+FUS.subset <- ETS.exons %>% 
+  filter(grepl("FUS", geneA) | grepl("FUS", geneB)) %>% 
+  arrange(ETS_Fusion_Groups, Exons) %>% 
+  mutate(E7.Hits=grepl("7_",Exons))
+
+table(FUS.subset$E7.Hits)
+```
+
+```{r}
+ERG.subset <- ETS.exons %>% 
+  filter(grepl("ERG", geneA) | grepl("ERG", geneB)) %>% 
+  arrange(ETS_Fusion_Groups, Exons) %>% 
+  mutate(E10.Hits=grepl("10_|_10$", Exons))
+
+table(ERG.subset$E10.Hits)
+```
+
+
+```{r}
+#Exclude these from now on
+ETS.del <- samples %>% 
+  filter(grepl("ETV6 \\(deletion\\)", Primary.Fusion) | grepl("ETV6 \\(deletion\\)", Additional.Fusions.CNV)) %>% 
+  select(USI, ISCN, Primary.Fusion, Additional.Fusions.CNV)
+# ETS.del
+```
+
+
+ETV6 has breakpoint hotspot in exons 1-3 (esp. E2) (15/21 ETV6 fusions)
+ERG has breakpoint hotspot in exon 10 (15/19 ERG fusions fusions)
+FEV has a breakpoint hotspon in exon 2
+FUS has a breakpoint hotspot in exon 7 (11/13 FUS fusions)
+
+FUS-ERG has consistent breakpoints in Exon 7 to Exon 10/7 of ERG (9/10)
+ERG-HNRNPH1 has consistent breakpoints (7/8) in Exon 10 Erg to Exon 4 HNRNPH1
+ERG-HNRNPH1 is entirely cryptic and FUS-ERG is entirely karyotypic. 
+ERG-HNRNPH1 has much better outcomes than FUS-ERG. 
+
+
+# Age of ETS Fusions
+
+```{r}
+age.df <-  ETS.only %>% 
+  select(ETS_Fusion_Groups, Age.Category) %>% 
+  group_by(ETS_Fusion_Groups, Age.Category, .drop = FALSE) %>% 
+  summarize(N=n()) %>% 
+  ungroup() %>% 
+  
+  group_by(ETS_Fusion_Groups) %>% 
+  mutate(Total=sum(N)) %>% 
+  ungroup() %>% 
+  
+  group_by(ETS_Fusion_Groups, Age.Category) %>% 
+  mutate(Percent=round(N/Total*100, digits=2)) %>% 
+  ungroup() %>% 
+  
+  mutate_at(vars(ETS_Fusion_Groups), ~factor(.,
+                                             levels=c("ETV6-MNX1","ETV6-Other","FUS-ERG","ERG-HNRNPH1", "ETS-Other")))
+
+
+# head(age.df)
+```
+
+```{r fig.width=10, fig.height=4}
+
+# pdf("TARGET_AML_ETS_Family_Fusions_Age_barplot.pdf", height = 4, width = 10)
+ggplot(age.df, aes(x=ETS_Fusion_Groups, y=Percent, fill=Age.Category)) + 
+  geom_col(position = position_dodge(), color="black") +
+  theme_classic() +
+  labs(y="Percent (%)", x="ETS Fusion Group") +
+  theme(axis.text = element_text(size=12, color="black"), 
+        axis.title = element_text(size=16, color="black"),
+        legend.text = element_text(size="12"))
+
+
+# dev.off()
+```
+
+```{r}
+ggplot(age.df, aes(x=Age.Category , y=Percent, fill=ETS_Fusion_Groups)) + 
+  geom_col(position = position_dodge(), color="black") +
+  theme_classic() +
+  # labs(y="Percent (%)", x="ETS Fusion Group") +
+  theme(axis.text = element_text(size=12, color="black"), 
+        axis.title = element_text(size=16, color="black"))
+```
+
+
+# Outcome
+
+```{r}
+in_df <- samples %>% 
+  filter(!is.na(EFS.time..days.))
+
+dim(in_df)
+```
+
+```{r}
+cc <- c("CD34_PB"="grey40",
+        "NBM"="black",
+        "ETS-Other"="darkturquoise",
+        "ETV6-MNX1"="darkorchid1",
+        "ETV6-Other"="darkorchid4",
+        "ERG-HNRNPH1"="firebrick2",
+        "FUS-ERG"="dodgerblue1",
+        "OtherAML"="navy")
+```
+
+```{r}
+KM.ETS <- KM.plots(df=in_df,
+                   group_vars = NULL,
+                   type = "OS",
+                   covariate = "ETS_Fusion_Groups",
+                   cohort = "1031",
+                   cc = cc[-c(1:2)])
+```
+
+```{r fig.height=7, fig.width=15}
+# pdf("Outcome_and_Characteristics/TARGET_AML_ETS_Family_Fusions_KM_plot.pdf", height = 7, width = 15)
+grid.arrange(grobs=c(KM.ETS$OS, KM.ETS$EFS), ncol=2)
+# dev.off()
+```
+
+HNRNPH1 is a member of the spliceosome. Don't spliceosome mutations have improved outcomes??
+
+- eh ERG-HNRNPH1 actually has like 70% SCT rate... so why?? 
+
+Look at relapse after SCT for different fusion groups or the group as a whole. 
+
+
+# Oncoprint
+
+```{r}
+
+```
+
+
+# Compare Groups for ETS Fusions 
+
+```{r message=FALSE}
+library(compareGroups)
+```
+
+```{r}
+cols <-read.csv(file.path(TARGET,
+                          "Clinical/metadata/TARGET_AML_Clinical_Columns_for_Analysis_7.24.20.csv"))$x
+cols <- gsub("Cyto.Fusion.Molecular.Risk","Cyto.Fusion.Molecular.Risk_update", cols) 
+
+table(cols %in% colnames(samples))
+cols <- cols[cols %in% colnames(samples)]
+
+table(samples$ETS_Fusion_Groups)
+```
+
+```{r}
+dat <- samples %>% 
+  filter(!grepl("NBM|CD34", Group)) %>% 
+  dplyr::select(Reg.,USI,ETS_Fusion_Groups, one_of(cols)) %>% #Reg.,USI,
+  mutate_at(vars(ETS_Fusion_Groups), 
+            ~factor(., levels=c("OtherAML","ETS-Other", 
+                                "ETV6-MNX1", "ETV6-Other", 
+                                "FUS-ERG", "ERG-HNRNPH1"))) %>%
+  
+  # mutate_at(vars(Age.Category),
+  #           ~case_when(
+  #             .== "Greater than 18 years" ~ "Greater than 10 years",
+  #             .=="Between 10 and 18 years"~ "Greater than 10 years",
+  #             TRUE ~ .)) %>%
+  # 
+  mutate_if(is.character, ~case_when(
+    .=="Unknown" ~ NA_character_, 
+    .=="unknown" ~ NA_character_, 
+    .=="Not reported" ~ NA_character_,
+    .=="<0.1" ~ NA_character_,
+    grepl("^\\.$", .) ~ NA_character_,
+    TRUE ~.))  
+
+
+# View(dat)
+# dim(dat) #1493   50
+table(dat$ETS_Fusion_Groups)
+head(dat)
+```
+
+Need to look at all ETS Fusions - they 
+
+```{r}
+comparisons <- paste("OtherAML", unique(ETS.only$ETS_Fusion_Groups)) %>% 
+  sapply(., str_split, pattern=" ") 
+
+names(comparisons) <- unique(ETS.only$ETS_Fusion_Groups)
+# comparisons
+```
+
+```{r message=FALSE, warning=FALSE}
+tables <- lapply(comparisons, function(x){
+  df <- dat %>% 
+    filter(ETS_Fusion_Groups %in% x) %>% 
+    droplevels(.)
+  
+  all.comp <- compareGroups(
+                        formula = ETS_Fusion_Groups ~ .,
+                        data = df,
+                        method = 4,
+                        max.ylev = 7,
+                        max.xlev = 10,
+                        Q1 = 0,
+                        Q3 = 1,
+                        ref = 1,
+                        p.corrected = TRUE,
+                        include.miss = FALSE)
+
+  table.chars <- createTable(all.comp,
+                             show.p.overall=TRUE,
+                             show.all = TRUE,
+                             show.p.mul = TRUE,
+                             show.n=TRUE)
+  
+  filename <- paste0("Outcome_and_Characteristics/TARGET_AML_ETS_Family_",x[2], "_Characteristics_", format(Sys.Date(),"%m.%d.%Y"),".xlsx")
+  # print(filename)
+  export2xls(table.chars,file = filename)
+  
+  
+})
+
+```
+
+ 
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+

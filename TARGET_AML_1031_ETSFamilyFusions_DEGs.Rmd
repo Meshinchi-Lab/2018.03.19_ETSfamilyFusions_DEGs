@@ -1,0 +1,710 @@
+---
+title: 'ETS Family Mutations Expression Profile'
+author: "Jenny Smith"
+date: "March 19, 2018"
+output: html_document
+---
+
+#Set-up 
+
+```{r setup}
+library(knitr)
+knitr::opts_knit$set(root.dir = '/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.03.19_ETSfamilyFusions_DEGs/')
+```
+
+```{r}
+options(stringsAsFactors = FALSE)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.width = 10, fig.height = 10)
+```
+
+```{r message = FALSE, warning=FALSE}
+library(stringr)
+library(magrittr)
+library(ggplot2)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(ComplexHeatmap)
+getwd()
+```
+
+
+```{r}
+# source("~/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/DifferentialExpressionPipeline_01.07.19.r")
+```
+
+#Define Functions 
+
+```{r}
+quick.Frequency <- function(df){
+  
+  tab <- sapply(df, table)  %>%
+        as.data.frame() %>%
+        rownames_to_column("Status") %>%
+        gather(Category,val, -Status) %>%
+        spread(Status,val) %>%
+        mutate(Event_Type=case_when(
+          grepl("CNVs", Category) ~ "CNV",
+          grepl("SNVs", Category) ~ "SNV",
+          TRUE ~ "Fusion"), 
+          Percent.Pos.Screened=round((Yes/(Yes+No))*100, digits = 1)) %>%
+        arrange(Event_Type) %>%
+        select(Event_Type, Category, Yes,No,Percent.Pos.Screened, Unknown)
+  
+  return(tab)
+}
+```
+
+
+#Read in the Clinical Data
+
+```{r}
+CDE.merged <- read.csv("~/reference_mapping-files/TARGET_AML_0531_1031_merged_CDEs_1.10.19.csv")
+
+
+CDE.merged <- CDE.merged %>%
+  filter(!is.na(USI)) %>%
+  set_rownames(.$USI)
+
+
+head(CDE.merged[,1:5])
+dim(CDE.merged) #2153  184
+```
+
+#Read in the expression data
+
+```{r}
+# cts <- readRDS("~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_1031_0531_Counts_List.RDS")
+```
+
+```{r}
+cts.RBD <- read.csv("~/RNA_seq_Analysis/0000.00.03_Expression_Matrices/TARGET_AML_0531_1031_Ribodepleted_RNAseq_dupGenesRemoved_FractionalCounts.csv", 
+                    stringsAsFactors = FALSE, row.names = 1)
+
+cts.RBD <-cts.RBD[,!grepl("^Kas|^MV4|sorted|MPN[0-9]|replicate",colnames(cts.RBD), ignore.case = TRUE)]
+colnames(cts.RBD) <- str_split_fixed(colnames(cts.RBD), "\\.", n=5)[,3]
+
+head(cts.RBD[,1:5])
+dim(cts.RBD)
+```
+
+
+
+#Examine the Frequencies of Each ETS Group
+
+```{r}
+ETS <- read.csv("~/RNA_seq_Analysis/0000.00.02_Reference_GeneInfo/ETS transcription factor family_HGNC.csv", 
+                stringsAsFactors = FALSE)
+
+ETS.re <- paste(c("ETS",ETS$Approved.Symbol), collapse = "|")
+```
+
+```{r}
+cols <- colnames(CDE.merged) %>% grep(ETS.re,., value=TRUE) %>%
+  grep("Bar|ETS.SNVs|ETS.CNVs", ., invert = T, value=T)
+
+cols
+```
+
+For the original analysis and Frequencies - see the bottom part of the script
+
+```{r}
+AllComers <- quick.Frequency(df=CDE.merged[,cols])
+AllComers
+write.csv(AllComers, "TARGET_AML_0531_1031_ETS_Mutants_Frequency_Table.csv")
+```
+
+
+```{r}
+N.3 <- function(x){sum(grepl("Yes", x)) > 2}
+pts.RBD <- intersect(CDE.merged$USI, colnames(cts.RBD))
+
+RBD.Freq <- quick.Frequency(df=select_if(CDE.merged[pts.RBD,cols],N.3))
+
+RBD.Freq
+# write.csv(RBD.Freq, "TARGET_AML_RBD_ETS_Mutants_Frequency_Table.csv")
+```
+
+```{r}
+dim(cts.RBD)
+```
+
+
+
+
+
+#Differential Expression 
+
+
+```{r}
+# RBD.Freq$Category
+# groups <- c("ETS.Family.Fusions","ERG.Fusion","ETV6.Fusion")
+
+DEGs.RBD <- lapply(RBD.Freq$Category,
+                   twoGroups_DEGs, 
+                   expnData = cts.RBD, 
+                   clinData = CDE.merged, 
+                   ref = "No", 
+                   logCPM=FALSE,BM=FALSE,GOI=NULL,
+                   anno=FALSE, 
+                   Add.Anno.Col = TRUE, 
+                   Custom.Cols=FALSE,
+                   Anno.Cols=grep("Bar",colnames(CDE.merged), value=T))
+
+names(DEGs.RBD) <- RBD.Freq$Event_Type
+# names(DEGs.RBD) <- groups
+# saveRDS(DEGs.RBD, "TARGET_AML_1031_RBD_ETS.Family_vs_OtherAML_DEGs.RDS")
+```
+
+
+```{r}
+DEGs.RBD <- readRDS("TARGET_AML_1031_RBD_ETS.Family_vs_OtherAML.RDS")
+summary(DEGs.RBD)
+```
+
+```{r}
+#Used for testing prior.count.... 
+DEGs.ETS <- twoGroups_DEGs(expnData = cts.RBD, 
+                   clinData = CDE.merged, 
+                   col="ETS.Family.Fusions",
+                   ref = "No", 
+                   logCPM=FALSE,BM=FALSE,GOI=NULL,
+                   anno=FALSE, 
+                   Add.Anno.Col = TRUE, 
+                   Custom.Cols=FALSE,
+                   Anno.Cols=grep("Bar",colnames(CDE.merged), value=T))
+
+
+# saveRDS(DEGs.ETS,"TARGET_AML_1031_RBD_ETS.Family.Fusion_vs_OtherAML_DEGs_add0.5_1.14.19.RDS")
+summary(DEGs.ETS)
+```
+
+DEGs.ETS <- readRDS("TARGET_AML_1031_RBD_ETS.Family.Fusion_vs_OtherAML_DEGs_1.14.19.RDS") #added 0.01
+
+```{r fig.width=14, fig.height=8}
+# tiff("TARGET_AML_1031_RBD_ETS.Family.Fusion_vs_OtherAML_DEGs_add0.1_Heatmap.tiff", height = 8, width = 14, units="in", res=300)
+draw(DEGs.ETS$Heatmap)
+# dev.off()
+```
+
+
+
+#Examine the Transcriptional signature 
+
+```{r}
+SuccessA <- ETS.0531[which(sapply(ETS.0531, length) > 5)]
+SuccessB <- ETS.0531.hd[which(sapply(ETS.0531.hd, length) > 5)]
+
+length(SuccessA) #6 with > 10 DEGs
+length(SuccessB) # 4 with > 10 DEGs
+
+# save(SuccessA, file="TARGET_AML_0531_ETS.Family.Mutations_DEGs_list.RData")
+# save(SuccessB, file="TARGET_AML_hd.0531_ETS.Family.Mutations_DEGs_list.RData")
+```
+
+```{r}
+DEGsA <- lapply(SuccessA, extract_DEGs)
+DEGsB <- lapply(SuccessB, extract_DEGs)
+```
+
+
+```{r}
+# lapply(names(DEGsA), function(x) write.csv(DEGsA[[x]],
+#                                            file=paste0("TARGET_AML_0531_",x,"vs_OtherAML_DEGs.csv")))
+# lapply(names(DEGsB), function(x) write.csv(DEGsB[[x]],
+#                                            file=paste0("TARGET_AML_hd.0531_",x,"vs_OtherAML_DEGs.csv")))
+```
+
+
+```{r}
+Success.1031 <- ETS.1031[which(sapply(ETS.1031, length) > 5)] #3 with signanures
+DEGs.1031 <- lapply(Success.1031, extract_DEGs)
+
+names(Success.1031)
+# lapply(names(DEGs.1031), function(x) write.csv(DEGs.1031[[x]],
+#                                            file=paste0("TARGET_AML_hd.1031_",x,"vs_OtherAML_DEGs.csv")))
+```
+
+```{r}
+Success.1031.SNVs <- ETS.SNVs.1031[which(sapply(ETS.SNVs.1031, length) > 5)] #3 with signanures
+DEGs.1031.SNVs <- lapply(Success.1031.SNVs, extract_DEGs)
+
+names(Success.1031.SNVs)
+# lapply(names(DEGs.1031.SNVs), function(x) write.csv(DEGs.1031.SNVs[[x]],
+#                                            file=paste0("TARGET_AML_hd.1031_",x,"vs_OtherAML_DEGs.csv")))
+```
+
+
+#Examine Heatmaps 
+
+
+```{r fig.width=12, fig.height=8}
+# tiff("TARGET_AML_RBD_ETS.Family.Fusions_vs_OtherAML.tiff", height = 8, width=14, units="in", res=300)
+draw(DEGs.RBD$ETS.Family.Fusions$Heatmap)
+# dev.off()
+```
+
+
+```{r fig.width=14, fig.height=8}
+# tiff("TARGET_AML_RBD_ERG.Fusions_vs_OtherAML.tiff", height = 8, width=14, units="in", res=300)
+draw(DEGs.RBD$ERG.Fusion$Heatmap)
+# dev.off()
+```
+
+```{r fig.width=12}
+# tiff("TARGET_AML_RBD_ETV6.Fusion_Fusions_vs_OtherAML.tiff", height = 8, width=14, units="in", res=300)
+draw(DEGs.RBD$ETV6.Fusion$Heatmap)
+# dev.off()
+```
+
+
+
+#Examine the clustering of ETS Family Fusions 
+
+```{r fig.height=3, fig.width=16}
+ETS.Fam.Fus.d <- column_dend(DEGs.RBD$ETS.Family.Fusions$Heatmap)
+ETS.Fam.Fus.Ord <- column_order(DEGs.RBD$ETS.Family.Fusions$Heatmap)
+ETS.USIs.Ord <- names(DEGs.RBD$ETS.Family.Fusions$phenovector)[ETS.Fam.Fus.Ord]
+
+# str(ETS.Fam.Fus.d) #OK 
+# plot(ETS.Fam.Fus.d)
+```
+
+```{r}
+d.groups <- colorDends_Groups(dendrogram=ETS.Fam.Fus.d, 
+                              phenovector=DEGs.RBD$ETS.Family.Fusions$phenovector,
+                              colorcodes = c("GroupA"="red", "GroupB"="black"),
+                              h=200)
+```
+
+```{r fig.height=3, fig.width=16}
+# tiff("ETS.Family.Fusions_vs_OtherAML_ColorDend.tiff", height = 4, width = 16, units = "in", res=300)
+par(mfrow=c(1,1), cex=0.1, mar=c(6.5, 7.5, 8.5, 2), pty="m")
+    plot(d.groups$dend,
+         xlab = " ", ylab=" ",  main=" ",
+         axes=TRUE,
+         type = "rectangle",
+         cex.axis=10,
+         horiz = FALSE)
+par(cex=0.8, cex.main = 1, cex.lab = 0.85)
+# dev.off()
+```
+
+```{r fig.height=3, fig.width=10}
+par(mfrow=c(1,1), cex=0.75, mar=c(4.5, 4.5, 4.5, 2), pty="m")
+    plot(d.groups$split_dends[[3]],
+         xlab = " ", ylab=" ",  main=" ",
+         axes=TRUE,
+         type = "rectangle",
+         cex.axis=1.2,
+         horiz = FALSE)
+par(cex=0.8, cex.main = 1, cex.lab = 0.85)
+```
+
+
+
+##Clinical Characteristics of the ETS.Family.Fusions  
+
+```{r message=FALSE}
+library(compareGroups)
+```
+
+
+```{r}
+df <- data.frame(ETS_Group_Number=d.groups$groups, 
+                 USI=unlist(d.groups$group_labels)) %>%
+  left_join(., CDE.merged, by="USI") %>%
+    select(USI,Reg., ISCN,
+          RBD.Freq$Category,ETS_Group_Number,
+        # ETS_Group_Number, ETS.Family.Fusions, ETS.
+         Protocol, CBFA2T3.GLIS2, Age.Category, Age.Yrs,
+         Gender, Race, Ethnicity, 
+         WBC.at.Diagnosis, Bone.marrow.leukemic.blast.percentage...., Peripheral.blasts....,
+         EMD=Was.the.patient.diagnosed.with.non.CNS.extramedullary.disease.,CNS=CNS.disease.at.on.study,
+         Risk.group,Primary.Cytogenetic.Code,
+         NPM.mutation, CEBPA.mutation,FLT3.ITD.positive.,
+         FAB_or_WHO.Classification, RAM.phenotype,
+         matches("^t.|^inv|^del|^MLL$|^mono|^Minus"), M6_AML, M7_AML,
+         matches("DEK|KDM5A|NSD1|RBM15"), 
+         matches("MRD\\.|CR.status")) %>%
+  
+  mutate(EMD=gsub("\\.", "Unknown", EMD), 
+         ETS.like=ifelse(ETS_Group_Number==3, "Yes", "No")) 
+
+head(df[,1:10])
+dim(df)
+```
+
+```{r}
+table(df$ETS_Group_Number, df$ETS.Family.Fusions, useNA="always")
+table(df$ETS.like, useNA="always")
+# table(df$FEV.Fusion)
+```
+
+```{r}
+comp.all <- compareGroups(ETS.like ~ ., 
+                           method=4, 
+                           Q1=0, Q3=1, 
+                           ref.no="No",
+                           data = df[,-c(1:3)])
+
+```
+
+```{r}
+tab.all <- createTable(comp.all)
+ export2csv(tab.all,"TARGET_AML_RBD_ETS.Family.Fusions_Cluster_vs_OtherAML_ClinChars_Table.csv")
+```
+
+
+
+
+
+
+#Results of GSEA
+
+NOTE: Run this code in the termin in R env. bc too memory intensive. 
+
+```{r}
+samps <- list("LD.0531"=SuccessA, "HD.0531"=SuccessB)
+
+GSA.list <- list()
+for (i in 1:2){
+  res <- samps[[i]]
+  
+  filename <- paste0("TARGET_AML_",names(samps)[i],"_ETS.Family.Mutations_vs_otherAML_GAGE_GSA")
+  print(filename)
+  
+  GSA <- lapply(res, gage_from_pipeline, type="expn",geneset=C2.KEGG)
+  save(GSA,file=paste0(filename, "_expn_C2.KEGG.RData"))
+
+  GSA.FC <- lapply(res, gage_from_pipeline, type="FC",geneset=C2.KEGG) #None Significant
+  save(GSA.FC,file=paste0(filename, "_FC_C2.KEGG.RData"))
+
+  GSA.KEGG <- lapply(res, gage_from_pipeline, type="expn",geneset=NULL) #none significant
+  save(GSA.KEGG,file=paste0(filename, "_expn_HSA.KEGG.RData"))
+
+  GSA.C2.All <- lapply(res, gage_from_pipeline, type="expn",geneset=C2.All)
+  save(GSA.C2.All,file=paste0(filename, "_expn_C2.All.RData"))
+  
+}
+```
+
+## High Depth 0531
+
+```{r}
+path <- "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.03.19_ETSfamilyFusions_DEGs/Gage/HD.0531/"
+HD.0531.GSA.Files <- dir(path = path, pattern = ".RData")
+HD.0531.GSA.Files
+```
+
+```{r}
+HD.0531.GSA <- list()
+
+for (file in HD.0531.GSA.Files){
+  name <-  str_split_fixed(file, "_",n=9)[,9]
+  HD.0531.GSA[[name]] <- get(load(paste0(path, file)))
+}
+```
+
+```{r}
+head(HD.0531.GSA$expn_C2.All.RData$ELF1.CNVs$SigPaths[,1:5])
+head(HD.0531.GSA$expn_C2.KEGG.RData$ELF1.CNVs$SigPaths[,1:5])
+```
+
+```{r}
+for (i in 1:length(HD.0531.GSA)){
+  # print(gsub(".RData", ".csv", HD.0531.GSA.Files)[i])
+  
+  for (j in 1:length(HD.0531.GSA[[i]])){
+    name <- gsub(".RData", ".csv", HD.0531.GSA.Files[i]) %>%
+      gsub("ETS.Family.Mutations",names(HD.0531.GSA[[i]])[j],.)
+    print(name)
+    
+    if (nrow(HD.0531.GSA[[i]][[j]]$SigPaths) > 1){
+      write.csv(HD.0531.GSA[[i]][[j]]$SigPaths, file=name)
+    }
+  }
+}
+```
+
+
+##Low Depth 0531 
+
+```{r}
+path2 <- "/fh/fast/meshinchi_s/workingDir/TARGET/AML_TARGET/RNA/mRNAseq/analysis/2018.03.19_ETSfamilyFusions_DEGs/Gage/LD.0531/"
+LD.0531.GSA.Files <- dir(path = path2, pattern = ".RData")
+LD.0531.GSA.Files
+
+LD.0531.GSA <- list()
+
+for (file in LD.0531.GSA.Files){
+  name <-  str_split_fixed(file, "_",n=9)[,9]
+  LD.0531.GSA[[name]] <- get(load(paste0(path2, file)))
+}
+```
+
+```{r}
+LD.0531.GSA$expn_C2.All.RData$ERG.Fusion$SigPaths[1:10,1:5]
+```
+
+```{r}
+for (i in 1:length(LD.0531.GSA)){
+  # print(gsub(".RData", ".csv", LD.0531.GSA.Files)[i])
+  
+  for (j in 1:length(LD.0531.GSA[[i]])){
+    name <- gsub(".RData", ".csv", LD.0531.GSA.Files[i]) %>%
+      gsub("ETS.Family.Mutations",names(LD.0531.GSA[[i]])[j],.)
+    print(name)
+    
+    if (nrow(LD.0531.GSA[[i]][[j]]$SigPaths) > 1){
+      write.csv(LD.0531.GSA[[i]][[j]]$SigPaths, file=name)
+    }
+  }
+}
+```
+
+
+## Ribodepleted 0531/1031 
+
+```{r}
+path3="Gage/HD.RBD/"
+RBD.GAGE <- dir(path=path, pattern = ".RData")
+```
+
+```{r}
+RBD.GSA <- list()
+for (file in RBD.GAGE){
+  name <-  str_split_fixed(file, "_",n=9)[,c(4:6,9)] %>%
+    paste0(., collapse = "_") %>%
+    gsub(".RData", "", .)
+  RBD.GSA[[name]] <- get(load(paste0(path3, file)))
+}
+rm(list=ls(pattern = "^GSA"))
+```
+
+```{r}
+# write.csv(RBD.GSA$ETS.Family.Mutations_vs_otherAML_HSA.KEGG$SigPaths.Up,"TARGET_AML_RBD_ETS.Family.Mutations_vs_otherAML_HSA.KEGG_UpReg_GSA.csv", row.names = TRUE)
+# 
+# write.csv(RBD.GSA$ETS.Family.Mutations_vs_otherAML_HSA.KEGG$SigPaths.Dn, "TARGET_AML_RBD_ETS.Family.Mutations_vs_otherAML_HSA.KEGG_DnReg_GSA.csv", row.names = TRUE)
+```
+
+```{r}
+# write.csv(RBD.GSA$ETS.Family.Mutations_vs_otherAML_C2.All$SigPaths.Up,"TARGET_AML_RBD_ETS.Family.Mutations_vs_otherAML_C2.All_UpReg_GSA.csv", row.names = TRUE)
+# 
+# write.csv(RBD.GSA$ETS.Family.Mutations_vs_otherAML_C2.All$SigPaths.Dn, "TARGET_AML_RBD_ETS.Family.Mutations_vs_otherAML_C2.All_DnReg_GSA.csv", row.names = TRUE)
+```
+
+
+
+#Examine those without a distinct signaure 
+
+```{r}
+NoSig <- get(load("TARGET_AML_0531_ETS.Family.Mutations_vs_OtherAML_NoSignature_list.RData"))
+# NoSignature <- ETS.0531[which(sapply(ETS.0531, length) < 8)]
+names(NoSig)
+
+# save(NoSignature, file = "TARGET_AML_0531_ETS.Family.Mutations_vs_OtherAML_NoSignature_list.RData")
+```
+
+```{r}
+i <- which(sapply(colnames(ETS.CDE), function(x) sum(rownames(subset(ETS.CDE, ETS.CDE[,x] == "Yes")) %in% colnames(cts.0531))) == 0)
+i
+```
+
+```{r}
+i2 <- which(sapply(colnames(ETS.CDE), function(x) sum(rownames(subset(ETS.CDE, ETS.CDE[,x] == "Yes")) %in% colnames(cts.0531))) > 0 )
+i2
+```
+
+```{r}
+intersect(names(NoSig), names(i2)) #24 ETS.SNVs in cts.0531, ERF.SNVs has 2 in cts.0531
+```
+
+The majority of these are due to not having any samples in the CDE. Will try with counts from HD.0531 dataset 
+
+```{r}
+NoSig.1031 <- ETS.1031[which(sapply(ETS.1031, length) < 5)] 
+
+names(NoSig.1031) #both ELF1 and FEV fusiosn had only 1 member 
+```
+
+
+
+#Session Information 
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+#From Original Analysis on March 2018
+
+```{r}
+CDE.0531 <- read.csv("~/reference_mapping-files/TARGET_AML_current_asof_june30_2016_UPDATED_CLEAN_4.19.18.csv", 
+                     stringsAsFactors = FALSE)
+
+rownames(CDE.0531) <- CDE.0531$TARGET.USI.1
+
+dim(CDE.0531) #1000 by 128
+head(CDE.0531[,1:5])
+```
+
+
+```{r message=FALSE}
+ETS.1031.cols <- c("ERG.Fusion.Family",  "ETV6.Fusion.Family", "FEV.Fusion.Family",
+                   "ETV6.MNX1",          "FUS.ERG",            "ERG.HNRNPH1")
+
+# pdf("TARGET_AML_hd.1031__ETS.Family.Mutations_vs_otherAML_heatmap.pdf", height = 10, width=10)
+ETS.1031 <- lapply(ETS.1031.cols,
+                      twoGroups_DEGs, 
+                      expnData=cts.1031,
+                      clinData=CDE.1031,
+                      ref="No",
+                      logCPM=FALSE, 
+                      BM=FALSE)
+# dev.off()
+
+names(ETS.1031) <- ETS.1031.cols
+# save(ETS.1031,file="TARGET_AML_hd.1031_ETS.Family.Mutations_vs_otherAML.RData")
+
+
+
+
+
+ETS.SNVs.cols <- c("ERF.SNVs", "ETS2.SNVs", "ETV6.SNVs", "SPI1.SNVs", "ETS.Family.SNVs")
+
+# pdf("TARGET_AML_hd.1031_ETS.Family.SNVs_vs_otherAML_heatmap.pdf", height = 10, width=10)
+ETS.SNVs.1031 <- lapply(ETS.SNVs.cols, 
+                        twoGroups_DEGs, 
+                        expnData=cts.1031,
+                        clinData=CDE.1031, 
+                        ref="No",
+                        logCPM=FALSE,
+                        BM=FALSE)
+  
+# dev.off()
+# save(ETS.SNVs.1031,file="TARGET_AML_hd.1031_ETS.Family.SNVs_vs_otherAML.RData")  
+# ETS.SNVs.1031 <- get(load("TARGET_AML_hd.1031_ETS.Family.SNVs_vs_otherAML.RData"))
+names(ETS.SNVs.1031) <- ETS.SNVs.cols
+```
+
+
+```{r}
+Frequency <- sapply(ETS.CDE, table) %>%
+  as.data.frame() %>%
+  rownames_to_column("Status") %>% 
+  gather(var,val,-Status) %>%
+  spread(Status,val) %>%
+  select(Mutation=var,Yes,No,Unknown) %>% 
+  mutate(Mutation=gsub("ETS.SNVs", "ETS.Family.SNVs", Mutation), 
+         Mutation=gsub("ETS.CNVs", "ETS.Family.CNVs", Mutation)) %>%
+  mutate(Event_Type=str_split_fixed(Mutation, "\\.", n=2)[,2], 
+         Gene=str_split_fixed(Mutation, "\\.", n=2)[,1]) %>%
+  mutate(Percent.Positive=(Yes/(Yes+No))*100) %>%
+  select(Mutation,Gene, Event_Type, everything())
+
+Frequency
+
+write.csv(Frequency, "TARGET_AML_0531_ETS.Family.Mutations_Frequencies.csv", row.names = FALSE)
+
+
+
+LD.Numbers <- sapply(colnames(ETS.CDE), function(x) sum(rownames(subset(ETS.CDE, ETS.CDE[,x] == "Yes")) %in% colnames(cts.0531))) %>% 
+  as.data.frame() %>%
+  rownames_to_column("Status") %>% 
+  mutate(Status=gsub("ETS.SNVs", "ETS.Family.SNVs", Status), 
+         Status=gsub("ETS.CNVs", "ETS.Family.CNVs", Status)) %>%
+  mutate(Event_Type=str_split_fixed(Status, "\\.", n=2)[,2], 
+         Gene=str_split_fixed(Status, "\\.", n=2)[,1]) %>%
+  select(Gene,Event_Type,Number.With.RNA.Seq=".")
+
+write.csv(LD.Numbers, "TARGET_AML_ld.0531_Numbers_ETS.Family.Mutations.csv", row.names = FALSE)
+
+
+
+HD.Numbers <- sapply(colnames(ETS.CDE), function(x) sum(rownames(subset(ETS.CDE, ETS.CDE[,x] == "Yes")) %in% colnames(cts.0531.hd))) %>%
+    as.data.frame() %>%
+  rownames_to_column("Status") %>% 
+  mutate(Status=gsub("ETS.SNVs", "ETS.Family.SNVs", Status), 
+         Status=gsub("ETS.CNVs", "ETS.Family.CNVs", Status)) %>%
+  mutate(Event_Type=str_split_fixed(Status, "\\.", n=2)[,2], 
+         Gene=str_split_fixed(Status, "\\.", n=2)[,1]) %>%
+  select(Gene,Event_Type,Number.With.RNA.Seq=".")
+
+write.csv(HD.Numbers, "TARGET_AML_hd.0531_Numbers_ETS.Family.Mutations.csv", row.names = FALSE)
+```
+
+
+```{r}
+filename <- paste0("TARGET_AML_hd.1031_ETS.Family.Mutations_vs_otherAML_GAGE_GSA")
+
+for (i in 1){
+  GSA <- lapply(Success.1031, gage_from_pipeline, type="expn",geneset=C2.KEGG)
+  save(GSA,file=paste0(filename, "_expn_C2.KEGG.RData"))
+  rm(GSA)
+  gc()
+  
+  GSA.FC <- lapply(Success.1031, gage_from_pipeline, type="FC",geneset=C2.KEGG)
+  save(GSA.FC,file=paste0(filename, "_FC_C2.KEGG.RData"))
+  rm(GSA.FC)
+  gc()
+  
+  GSA.KEGG <- lapply(Success.1031, gage_from_pipeline, type="expn",geneset=NULL) 
+  save(GSA.KEGG,file=paste0(filename, "_expn_HSA.KEGG.RData"))
+  rm(GSA.KEGG)
+  gc() 
+  
+  GSA.C2.All <- lapply(Success.1031, gage_from_pipeline, type="expn",geneset=C2.All)
+  save(GSA.C2.All,file=paste0(filename, "_expn_C2.All.RData"))
+  rm(GSA.C2.All)
+  gc()
+  
+} 
+
+
+for (i in 1){
+  GSA <-  gage_from_pipeline(res.1031,type="expn",geneset=C2.KEGG)
+  save(GSA,file=paste0(filename, "_expn_C2.KEGG.RData"))
+  rm(GSA)
+  gc()
+  
+  GSA.FC <- gage_from_pipeline(res.1031, type="FC",geneset=C2.KEGG)
+  save(GSA.FC,file=paste0(filename, "_FC_C2.KEGG.RData"))
+  rm(GSA.FC)
+  gc()
+  
+  GSA.KEGG <- gage_from_pipeline(res.1031, type="expn",geneset=NULL) 
+  save(GSA.KEGG,file=paste0(filename, "_expn_HSA.KEGG.RData"))
+  rm(GSA.KEGG)
+  gc() 
+  
+  GSA.C2.All <- gage_from_pipeline(res.1031, type="expn",geneset=C2.All)
+  save(GSA.C2.All,file=paste0(filename, "_expn_C2.All.RData"))
+  rm(GSA.C2.All)
+  gc()
+  
+} 
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
